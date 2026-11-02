@@ -295,7 +295,7 @@ def _garak_hit() -> ProbeHit:
 
 
 def _install_garak(
-    monkeypatch: pytest.MonkeyPatch, finding: bool, *, shallow: bool = True
+    monkeypatch: pytest.MonkeyPatch, finding: bool, shallow: bool = True
 ) -> None:
     def fake_select(
         family: str,

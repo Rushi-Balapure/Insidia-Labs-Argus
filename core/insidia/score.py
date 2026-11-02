@@ -232,7 +232,6 @@ def risk_assessment(
     text: str,
     confidence: str,
     engine_count: int,
-    *,
     non_prod: bool = False,
 ) -> tuple[str, float, tuple[str, ...], tuple[str, ...]]:
     """Return severity, Insidia Risk Score, explainers, and CVE ids.

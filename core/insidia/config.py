@@ -122,7 +122,6 @@ def init_destination(path: Path) -> Path:
 
 def init_config(
     destination: Path,
-    *,
     url: str | None = None,
     kind: str | None = None,
 ) -> Path:

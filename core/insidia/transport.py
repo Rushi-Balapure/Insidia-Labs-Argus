@@ -185,7 +185,6 @@ def fetch_target(
     target: Target,
     payload: str,
     scope: tuple[ScopeHost, ...],
-    *,
     follow: bool = True,
 ) -> tuple[int, dict[str, str], str]:
     """Status, headers, and body for one payload. Redirects are optional."""
@@ -266,7 +265,6 @@ def fetch(
     headers: dict[str, str] | None = None,
     limiter: RateLimiter | None = None,
     timeout: float = 10,
-    *,
     follow: bool = True,
 ) -> tuple[int, dict[str, str], str]:
     """Status, response headers, and body. An error status is returned, not raised.

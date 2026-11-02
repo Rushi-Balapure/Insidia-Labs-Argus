@@ -38,7 +38,7 @@ def test_zap_without_java_is_not_installed(
     assert code == 2
 
 
-def _models(path: Path, *, provider: str = "openai-compatible", judge: bool = True) -> None:
+def _models(path: Path, provider: str = "openai-compatible", judge: bool = True) -> None:
     judge_block = ""
     if judge:
         judge_block = """
@@ -216,7 +216,7 @@ def local_app() -> Iterator[int]:
         server.server_close()
 
 
-def _chat(path: Path, url: str, *, scope: str = "  - host: 127.0.0.1\n") -> None:
+def _chat(path: Path, url: str, scope: str = "  - host: 127.0.0.1\n") -> None:
     path.write_text(
         f"""
 version: 1

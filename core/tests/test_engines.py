@@ -395,10 +395,10 @@ def test_pyrit_is_single_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
             timeouts.append(timeout)
 
     class PromptSendingAttack:
-        def __init__(self, *, objective_target: HTTPTarget) -> None:
+        def __init__(self, objective_target: HTTPTarget) -> None:
             self.objective_target = objective_target
 
-        async def execute_async(self, *, objective: str, **kwargs: object) -> None:
+        async def execute_async(self, objective: str, **kwargs: object) -> None:
             sent.append((objective, self.objective_target.http_request))
 
     async def initialize_pyrit_async(*args: object, **kwargs: object) -> None:

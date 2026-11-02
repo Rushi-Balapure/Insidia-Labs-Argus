@@ -926,7 +926,6 @@ def _target_names(
 
 
 def _executive_summary(
-    *,
     run_id: str,
     policy: str,
     findings: list[Finding],
@@ -1226,12 +1225,12 @@ def _finding_body(finding: Finding, run_id: str) -> str:
     return "".join(f"<dt>{name}</dt><dd>{value}</dd>" for name, value in fields)
 
 
-def _location_row(finding: Finding, token: str, *, show_target: bool) -> str:
+def _location_row(finding: Finding, token: str, show_target: bool) -> str:
     attr = f' data-target="{token}"' if token else ""
     return f'<li class="loc"{attr}>{_location_html(finding, show_target=show_target)}</li>'
 
 
-def _location_html(finding: Finding, *, show_target: bool) -> str:
+def _location_html(finding: Finding, show_target: bool) -> str:
     file_line = _file_line_text(finding.location)
     pins = _package_pins(finding)
     cves = _cve_ids(finding)

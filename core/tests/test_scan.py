@@ -393,7 +393,7 @@ def test_a_refused_redirect_keeps_an_earlier_finding(
 
 
 def _scan_then_refuse_redirect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, finding: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finding: bool
 ) -> tuple[int, dict[str, object], list[dict[str, object]], int, str]:
     """Scan a finished target, then refuse a port-changing redirect on the next one."""
     followed = {"n": 0}

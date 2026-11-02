@@ -73,7 +73,6 @@ def _control(
     taxonomy: tuple[str, ...] = ("benchmark",),
     severity: str = "high",
     track: str = "classic",
-    *,
     check_id: str = "",
     title: str = "",
     synopsis: str = "",

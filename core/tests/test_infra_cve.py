@@ -63,7 +63,7 @@ def _serve(server: str, powered_by: str = "") -> Iterator[tuple[int, list[str]]]
         httpd.server_close()
 
 
-def _config(tmp_path: Path, port: int, *, placeholder: bool = False) -> Path:
+def _config(tmp_path: Path, port: int, placeholder: bool = False) -> Path:
     query = '    query:\n      q: "{{payload}}"\n' if placeholder else ""
     path = tmp_path / "insidia.yaml"
     path.write_text(
