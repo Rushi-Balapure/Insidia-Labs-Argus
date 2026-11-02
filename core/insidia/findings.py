@@ -138,7 +138,7 @@ def prepare_findings(findings: list[Finding]) -> list[Finding]:
     return sorted((score_finding(item) for item in findings), key=_order)
 
 
-def score_finding(finding: Finding, *, non_prod: bool = False) -> Finding:
+def score_finding(finding: Finding, non_prod: bool = False) -> Finding:
     """Fill catalog text and the Insidia Risk Score. A second call keeps the first score."""
     if finding.risk_factors:
         return finding

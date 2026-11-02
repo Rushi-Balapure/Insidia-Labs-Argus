@@ -7,7 +7,7 @@ from html import escape
 from insidia.score import Score, coverage
 
 
-def status_badge(result: str, *, uppercase: bool = False) -> str:
+def status_badge(result: str, uppercase: bool = False) -> str:
     """Keep an explicit label alongside each status color and symbol."""
     css = {
         "pass": "pass",
@@ -87,7 +87,7 @@ def summary_metrics(counts: CheckCounts, findings: int) -> str:
     return f'<dl class="metrics">{body}</dl><p class="note">{note}</p>'
 
 
-def stacked_bar(segments: Sequence[tuple[str, int, str]], *, unit: str) -> str:
+def stacked_bar(segments: Sequence[tuple[str, int, str]], unit: str) -> str:
     """A proportional bar with focusable segments and complete textual values."""
     total = sum(count for _label, count, _css in segments)
     description = "; ".join(f"{label}: {count}" for label, count, _css in segments)
@@ -155,7 +155,7 @@ def framework_item_table(rows: Sequence[tuple[str, str, str]]) -> str:
     )
 
 
-def coverage_filter(content: str, counts: CheckCounts, *, prefix: str, unit: str) -> str:
+def coverage_filter(content: str, counts: CheckCounts, prefix: str, unit: str) -> str:
     options = [
         ("all", "All", counts.total),
         ("fail", "Failed", counts.failed),

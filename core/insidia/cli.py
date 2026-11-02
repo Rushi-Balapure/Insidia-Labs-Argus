@@ -38,7 +38,6 @@ global options, before or after the command:
 
 
 def _global_options(parser: argparse.ArgumentParser, after_command: bool) -> None:
-    # After the command the defaults are suppressed, so a value given before it survives.
     def default(value: object) -> object:
         return argparse.SUPPRESS if after_command else value
 

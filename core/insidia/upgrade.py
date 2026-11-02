@@ -113,7 +113,6 @@ def _tool(name: str) -> str:
 
 
 def upgrade(
-    *,
     check: bool,
     force: bool,
     output: IO[str] | None = None,
