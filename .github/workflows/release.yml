@@ -44,7 +44,7 @@ jobs:
           cp ../NOTICE ../THIRD_PARTY_NOTICES.md packaging/
           uv build --wheel
           (cd dist && sha256sum ./*.whl > SHA256SUMS)
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Sign the wheel
         working-directory: core
         run: |
@@ -81,6 +81,6 @@ jobs:
           tags: |
             ghcr.io/rushi-balapure/insidia:${{ github.ref_name }}
             ghcr.io/rushi-balapure/insidia:latest
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Sign the image
         run: cosign sign --yes "ghcr.io/rushi-balapure/insidia@${{ steps.build.outputs.digest }}"
