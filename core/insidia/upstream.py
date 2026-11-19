@@ -24,6 +24,7 @@ from insidia.adapters import (
     has_standalone,
 )
 from insidia.catalog import BY_NAME, SPECS, SSTI_PAYLOAD, STATIC_PROMPT, EngineSpec
+from insidia.egress import current_gate, engine_proxy_args
 from insidia.errors import EngineFailed
 
 PROMPTFOO_ENV = {
@@ -108,6 +109,8 @@ def _garak(endpoint: RelayEndpoint, workspace: Path) -> Invocation:
         json.dumps({"test": {"Blank": {"prompts": [STATIC_PROMPT], "active": True}}}),
         encoding="utf-8",
     )
+    gate = current_gate()
+    proxies = None if gate is None else {"http": gate.url, "https": gate.url}
     generator = {
         "rest": {
             "RestGenerator": {
@@ -122,7 +125,7 @@ def _garak(endpoint: RelayEndpoint, workspace: Path) -> Invocation:
                 "response_json_field": "text",
                 "parallel_requests": 8,
                 "request_timeout": 180,
-                "proxies": None,
+                "proxies": proxies,
             }
         }
     }
@@ -171,6 +174,8 @@ def _promptfoo(endpoint: RelayEndpoint, workspace: Path) -> Invocation:
     env = dict(PROMPTFOO_ENV)
     env["INSIDIA_RELAY_URL"] = endpoint.url
     env["INSIDIA_RELAY_TOKEN"] = endpoint.token
+    if current_gate() is not None:
+        env["NODE_USE_ENV_PROXY"] = "1"
     return Invocation(
         _program("promptfoo"),
         ("eval", "-c", "promptfooconfig.yaml", "--no-cache", "-o", "report.json"),
@@ -288,7 +293,8 @@ def _web_prepare(engine: str) -> Callable[[ProbeSpec, ScopedUrl, Path], Invocati
             )
         else:
             raise ValueError(engine)
-        return Invocation(_program(engine), args, report, timeout=180)
+        proxied = (*args, *engine_proxy_args(engine))
+        return Invocation(_program(engine), proxied, report, timeout=180)
 
     return prepare
 
@@ -844,6 +850,9 @@ def _program(engine: str) -> str:
 
 
 _PROVIDER_JS = """\
+const http = require("http");
+const { URL } = require("url");
+
 class InsidiaRelay {
   id() {
     return "insidia-relay";
@@ -851,17 +860,54 @@ class InsidiaRelay {
 
   async callApi(prompt) {
     const text = typeof prompt === "string" ? prompt : prompt.prompt;
-    const response = await fetch(process.env.INSIDIA_RELAY_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: "Bearer " + process.env.INSIDIA_RELAY_TOKEN,
-      },
-      body: JSON.stringify({ prompt: text }),
+    const body = JSON.stringify({ prompt: text });
+    const payload = await post(process.env.INSIDIA_RELAY_URL, body, {
+      "content-type": "application/json",
+      authorization: "Bearer " + process.env.INSIDIA_RELAY_TOKEN,
     });
-    const body = await response.json();
-    return { output: body.text };
+    const parsed = JSON.parse(payload);
+    return { output: parsed.text };
   }
+}
+
+function post(url, body, headers) {
+  const target = new URL(url);
+  const proxy =
+    process.env.INSIDIA_EGRESS_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.http_proxy;
+  const via = proxy ? new URL(proxy) : null;
+  const options = via
+    ? {
+        hostname: via.hostname,
+        port: via.port,
+        method: "POST",
+        path: target.href,
+        headers: Object.assign({}, headers, {
+          Host: target.host,
+          "Content-Length": Buffer.byteLength(body),
+        }),
+      }
+    : {
+        hostname: target.hostname,
+        port: target.port,
+        method: "POST",
+        path: target.pathname + target.search,
+        headers: Object.assign({}, headers, {
+          "Content-Length": Buffer.byteLength(body),
+        }),
+      };
+  return new Promise((resolve, reject) => {
+    const req = http.request(options, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
 }
 
 module.exports = InsidiaRelay;
@@ -895,6 +941,18 @@ sys.exit(0 if (workspace / "report.json").is_file() else 1)
 _PYRIT_PY = """\
 import asyncio
 import os
+
+_proxy = os.environ.get("INSIDIA_EGRESS_PROXY")
+if _proxy:
+    import httpx as _httpx
+
+    _client = _httpx.AsyncClient
+
+    def _trust_proxy(*args, **kwargs):
+        kwargs["trust_env"] = True
+        return _client(*args, **kwargs)
+
+    _httpx.AsyncClient = _trust_proxy
 
 from pyrit.executor.attack import PromptSendingAttack
 from pyrit.prompt_target import HTTPTarget
@@ -940,6 +998,18 @@ _DEEPTEAM_PY = """\
 import json
 import os
 import urllib.request
+
+_proxy = os.environ.get("INSIDIA_EGRESS_PROXY")
+if _proxy:
+    import httpx as _httpx
+
+    _client = _httpx.AsyncClient
+
+    def _trust_proxy(*args, **kwargs):
+        kwargs["trust_env"] = True
+        return _client(*args, **kwargs)
+
+    _httpx.AsyncClient = _trust_proxy
 
 from deepeval.models import DeepEvalBaseLLM
 from deepteam import red_team

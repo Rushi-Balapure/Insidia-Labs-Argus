@@ -40,6 +40,7 @@ from insidia.adapters import (
     markdown_beacon,
 )
 from insidia.config import Project, Target, resolve_secret
+from insidia.egress import current_gate, open_socket
 from insidia.errors import (
     CliError,
     ConfigError,
@@ -702,7 +703,7 @@ def _handshake(host: str, port: int, version: ssl.TLSVersion) -> bool | str:
         return _CLIENT_TLS_GAP
     wanted = _LEGACY_TLS[version]
     try:
-        with socket.create_connection((host, port), timeout=10) as raw:
+        with open_socket(host, port, 10) as raw:
             with context.wrap_socket(raw, server_hostname=host) as tls:
                 chosen = tls.version()
     except ssl.SSLError as exc:
@@ -1067,6 +1068,9 @@ def _relay(
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = int(server.server_address[1])
+    gate = current_gate()
+    if gate is not None:
+        gate.allow_internal("127.0.0.1", port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

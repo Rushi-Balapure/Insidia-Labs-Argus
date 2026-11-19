@@ -1,4 +1,8 @@
-"""Keep every request inside the hosts declared in insidia.yaml."""
+"""Keep every request inside the hosts declared in insidia.yaml.
+
+Host strings are matched exactly. The connection is opened only to an address
+that resolution returned for that host, and that address is checked again.
+"""
 
 from __future__ import annotations
 
