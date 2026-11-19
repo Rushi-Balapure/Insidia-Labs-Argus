@@ -151,3 +151,6 @@ def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()

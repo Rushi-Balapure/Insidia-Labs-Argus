@@ -55,6 +55,9 @@ mypy_path = "."
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+  "error",
+]
 
 [tool.coverage.run]
 source = ["insidia"]
