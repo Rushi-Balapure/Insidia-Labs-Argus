@@ -12,7 +12,7 @@ from insidia.adapters import find
 from insidia.config import Project, Target
 from insidia.errors import CliError, EngineFailed, ProbeError, ScopeError
 from insidia.findings import Finding, normalize
-from insidia.mask import bind_secrets, mask
+from insidia.mask import bind_secrets, mask, reset_secrets
 from insidia.policy import MARKDOWN_BEACON, Policy, get_policy
 from insidia.probes import ProbeHit, _is_relay_shallow_note, reset_seen_replies, run
 from insidia.registry import select, unlock_hint
@@ -91,49 +91,52 @@ def execute(
     mode = coverage or project.coverage
     _validate_targets(project, root)
     secrets = _configured_secrets(project)
-    bind_secrets(secrets)
-    snapshot = config_snapshot(project.path.read_bytes(), secrets)
-    # Scope only. L1 does not connect to a configured attacker or judge.
-    for role in (project.attacker, project.judge):
-        if role is not None and role.base_url is not None:
-            check_url(role.base_url, project.scope)
-    model_available = project.attacker is not None
-    hits: list[ProbeHit] = []
-    records: list[CheckRecord] = []
-    controls: list[dict[str, str | int]] = []
-    skips: list[str] = []
-    count = len(project.targets)
-    _say(
-        progress,
-        Event(
-            "start",
-            detail=(
-                f"scan · policy {policy.name} · coverage {mode} · "
-                f"{count} target{'' if count == 1 else 's'}"
-            ),
-        ),
-    )
-    started = time.time()
-    token = bind_budget(project.targets)
+    secret_token = bind_secrets(secrets)
     try:
-        return _run_targets(
-            project,
-            root,
-            policy,
-            mode,
-            model_available,
-            hits,
-            records,
-            controls,
-            skips,
+        snapshot = config_snapshot(project.path.read_bytes(), secrets)
+        # Scope only. L1 does not connect to a configured attacker or judge.
+        for role in (project.attacker, project.judge):
+            if role is not None and role.base_url is not None:
+                check_url(role.base_url, project.scope)
+        model_available = project.attacker is not None
+        hits: list[ProbeHit] = []
+        records: list[CheckRecord] = []
+        controls: list[dict[str, str | int]] = []
+        skips: list[str] = []
+        count = len(project.targets)
+        _say(
             progress,
-            snapshot,
-            started,
-            rerun_of,
-            accept_banner_only,
+            Event(
+                "start",
+                detail=(
+                    f"scan · policy {policy.name} · coverage {mode} · "
+                    f"{count} target{'' if count == 1 else 's'}"
+                ),
+            ),
         )
+        started = time.time()
+        budget_token = bind_budget(project.targets)
+        try:
+            return _run_targets(
+                project,
+                root,
+                policy,
+                mode,
+                model_available,
+                hits,
+                records,
+                controls,
+                skips,
+                progress,
+                snapshot,
+                started,
+                rerun_of,
+                accept_banner_only,
+            )
+        finally:
+            reset_budget(budget_token)
     finally:
-        reset_budget(token)
+        reset_secrets(secret_token)
 
 
 def _run_targets(
@@ -566,10 +569,11 @@ def _configured_secrets(project: Project) -> tuple[str, ...]:
     for target in project.targets:
         if target.auth is None:
             continue
+        ref = target.auth.secret_ref
         try:
-            found.append(resolve_secret(target.auth.secret_ref))
-        except CliError:
-            continue
+            found.append(resolve_secret(ref))
+        except CliError as exc:
+            raise CliError(f"{target.name}: cannot resolve secret_ref {ref}") from exc
     return tuple(found)
 
 
