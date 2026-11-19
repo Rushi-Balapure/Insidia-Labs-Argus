@@ -46,6 +46,7 @@ from insidia.errors import (
     EngineFailed,
     HttpStatus,
     ProbeError,
+    ProbeTimeout,
     ScopeError,
 )
 from insidia.policy import MARKDOWN_BEACON, Control, get_policy
@@ -441,7 +442,7 @@ def _corpus(
             if _fixture_follow_up_is_useless(spec.family, index, outcome):
                 break
     except ProbeError as exc:
-        if timeout is not None and str(exc) == "target timed out":
+        if timeout is not None and isinstance(exc, ProbeTimeout):
             return [], ""
         return hits, str(exc)
     if not answered and rejected:

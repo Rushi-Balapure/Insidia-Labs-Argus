@@ -15,7 +15,7 @@ import pytest
 from insidia.adapters import BUILT_IN, Invocation, ProbeSpec, RelayAdapter, RelayEndpoint
 from insidia.cli import main
 from insidia.config import Project
-from insidia.errors import ProbeError
+from insidia.errors import ProbeTimeout
 from insidia.policy import POLICIES
 from insidia.probes import (
     _FIXTURE_ONLY_NOTE,
@@ -605,7 +605,7 @@ models:
         seen.append((payload, given))
         if given != _FIXTURE_ONLY_TIMEOUT:
             raise AssertionError(f"fixture probe used the target timeout {given}")
-        raise ProbeError("target timed out")
+        raise ProbeTimeout("target timed out")
 
     monkeypatch.setattr("insidia.probes.exchange", blocked)
     started = time.monotonic()

@@ -13,7 +13,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from insidia.errors import EngineFailed
+from insidia.errors import EngineFailed, EngineTimeout
 
 _ALLOW = (
     "PATH",
@@ -99,7 +99,7 @@ def run_command(
         _stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
-        raise EngineFailed(f"{label} timed out") from None
+        raise EngineTimeout(f"{label} timed out") from None
     except KeyboardInterrupt:
         # The child is in its own session, so the terminal's SIGINT never reached it.
         _kill_tree(proc)
