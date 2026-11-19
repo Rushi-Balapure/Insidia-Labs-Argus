@@ -37,7 +37,7 @@ from insidia.engines import (
     _publish,
     install,
 )
-from insidia.errors import CliError, EngineFailed
+from insidia.errors import CliError, EngineFailed, EngineTimeout
 from insidia.policy import get_policy
 from insidia.probes import run
 from insidia.process import _argv_for, child_env, launch_installed, run_command
@@ -821,8 +821,10 @@ def test_timeout_kills_the_process_group(tmp_path: Path) -> None:
     script = tmp_path / "sleep.py"
     script.write_text("import time\ntime.sleep(30)\n")
     invocation = Invocation(sys.executable, (str(script),), "report.json", timeout=0.5)
-    with pytest.raises(EngineFailed, match="timed out"):
+    with pytest.raises(EngineTimeout, match="timed out") as caught:
         launch_installed(invocation, tmp_path)
+    assert isinstance(caught.value, EngineFailed)
+    assert str(caught.value).endswith(" timed out")
 
 
 def test_child_env_allowlist_drops_a_proxy() -> None:
