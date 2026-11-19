@@ -128,46 +128,10 @@ def _call_for(cell: Cell) -> SandboxCall:
 def _scan(call: SandboxCall, conn: str) -> list[dict[str, object]]:
     if call.kind == "repo":
         return _cli(call, None)
-    if conn == "sdk_bridge":
-        return _sdk(call)
     sandbox = _ensure_sandbox()
     _reset(sandbox)
     with _front(conn, sandbox) as port:
         return _cli(call, port)
-
-
-def _sdk(call: SandboxCall) -> list[dict[str, object]]:
-    _ensure_insidia_import()
-    from insidia.adapters import BUILT_IN, ORACLES
-    from insidia.config import RateLimit, Target
-
-    from benchmark.targets.insidia.serve import call as plant
-    from benchmark.targets.insidia.serve import reset
-
-    reset()
-    spec = next(item for item in BUILT_IN.probes if item.family == call.attack)
-    oracle = ORACLES[spec.family]
-    viewed = Target(
-        "plant",
-        call.kind,
-        None,
-        None,
-        "GET",
-        None,
-        None,
-        {},
-        {},
-        None,
-        RateLimit(100, 1),
-        "http",
-        None,
-        (),
-    )
-    found: list[dict[str, object]] = []
-    for payload in BUILT_IN.corpus[spec]:
-        if oracle(payload, plant(call.module, call.fn, payload), viewed) is not None:
-            found.append({"attack": call.attack})
-    return found
 
 
 def _cli(call: SandboxCall, port: int | None) -> list[dict[str, object]]:
@@ -194,7 +158,7 @@ def _cli(call: SandboxCall, port: int | None) -> list[dict[str, object]]:
 
 @contextlib.contextmanager
 def _front(conn: str, sandbox: int) -> Iterator[int]:
-    if conn == "direct":
+    if conn in {"direct", "sdk_bridge"}:
         yield sandbox
         return
     if conn == "relay":
