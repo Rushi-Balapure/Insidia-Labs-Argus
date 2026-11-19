@@ -548,6 +548,17 @@ def test_scan_finds_the_sandbox_plants_and_passes_a_clean_target(tmp_path: Path)
         try:
             _write(tmp_path, int(clean.server_address[1]), "data_leakage", "ssti")
             assert main(["scan", "--config", str(tmp_path / "insidia.yaml")]) == 0
+            finished = _finished_runs(tmp_path)
+            assert len(finished) == 2
+            first, second = sorted(finished, key=lambda path: path.stat().st_mtime_ns)
+            first_manifest = json.loads((first / "manifest.json").read_text(encoding="utf-8"))
+            second_manifest = json.loads((second / "manifest.json").read_text(encoding="utf-8"))
+            assert first_manifest["config_digest"] != second_manifest["config_digest"]
+            report = (second / "report.html").read_text(encoding="utf-8")
+            # Different ports change the digest, so this baseline is the target-name match.
+            # Finish time picks it even when the later run's id sorts first in that second.
+            assert f"Fixed since {first.name}" in report
+            assert f"fixed since {first.name}." in report
         finally:
             clean.shutdown()
             clean.server_close()
@@ -670,6 +681,15 @@ def test_trivy_and_osv_scanner_are_named_in_the_scan_output(
 def _latest(root: Path, name: str) -> Path:
     runs = sorted((root / ".insidia" / "runs").iterdir())
     return runs[-1] / name
+
+
+def _finished_runs(root: Path) -> list[Path]:
+    runs = root / ".insidia" / "runs"
+    return [
+        path
+        for path in runs.iterdir()
+        if not path.name.startswith(".") and path.is_dir() and not path.is_symlink()
+    ]
 
 
 def _free_port() -> int:

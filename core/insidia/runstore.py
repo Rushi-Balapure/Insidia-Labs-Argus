@@ -44,6 +44,9 @@ from insidia.results import SCHEMA_VERSION, legacy_passed
 from insidia.score import Score, score_frameworks, severity_rank
 
 _BEARER = re.compile(r"Bearer [A-Za-z0-9._\-]{8,}")
+# new_run_id() is "{UTC second}-{6 hex}". Sorting those ids sorts runs across
+# seconds. The hex suffix does not order two runs that share a second.
+_STAMPED_RUN_ID = re.compile(r"\A\d{8}T\d{6}Z-")
 
 
 def config_snapshot(raw: bytes, secrets: tuple[str, ...] = ()) -> bytes:
@@ -317,23 +320,68 @@ def _compare_findings(
 
 
 def _earlier_run_dirs(runs: Path, run_id: str) -> list[Path]:
-    """Finalized runs whose ids sort before this one. Names starting with '.' are skipped."""
+    """Finalized runs written before this one, newest first.
+
+    Names starting with '.' are skipped. Ids from a later UTC second sort after
+    earlier ones. Inside one second the random suffix does not record finish
+    order, so a directory finished earlier in that second still counts when its
+    name sorts after this id.
+    """
     if runs.is_symlink() or not runs.is_dir():
         return []
-    found: list[Path] = []
     try:
         children = list(runs.iterdir())
     except OSError:
         return []
+    cutoff = _directory_mtime_ns(runs / f".{run_id}.partial")
+    found: list[tuple[str, int, str, Path]] = []
     for path in children:
         name = path.name
-        if name.startswith(".") or name >= run_id:
+        if name.startswith(".") or name == run_id:
             continue
         if path.is_symlink() or not path.is_dir() or not _stays_inside(runs, path):
             continue
-        found.append(path)
-    found.sort(key=lambda item: item.name, reverse=True)
-    return found
+        modified = _directory_mtime_ns(path)
+        if name >= run_id and not _finished_earlier_same_second(name, run_id, modified, cutoff):
+            continue
+        found.append((*_recency_key(name, modified), path))
+    found.sort(reverse=True)
+    return [item[-1] for item in found]
+
+
+def _directory_mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
+def _finished_earlier_same_second(
+    name: str, run_id: str, modified_ns: int, cutoff_ns: int
+) -> bool:
+    """True when name sorts later only because both runs share a UTC second."""
+    stamp = _utc_stamp(run_id)
+    return bool(
+        stamp is not None
+        and name.startswith(stamp)
+        and modified_ns >= 0
+        and cutoff_ns >= 0
+        and modified_ns < cutoff_ns
+    )
+
+
+def _utc_stamp(run_id: str) -> str | None:
+    if _STAMPED_RUN_ID.match(run_id) is None:
+        return None
+    return run_id[:16]
+
+
+def _recency_key(name: str, modified_ns: int) -> tuple[str, int, str]:
+    """Later UTC seconds first; inside one second, the later finish first."""
+    stamp = _utc_stamp(name)
+    if stamp is None:
+        return (name, 0, name)
+    return (stamp, modified_ns, name)
 
 
 def _contained_child(runs: Path, name: str) -> Path | None:
