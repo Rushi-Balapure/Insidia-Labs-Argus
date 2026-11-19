@@ -10,6 +10,7 @@ from pathlib import Path
 
 from insidia.adapters import find
 from insidia.config import Project, Target
+from insidia.egress import confine
 from insidia.errors import CliError, EngineFailed, ProbeError, ScopeError
 from insidia.findings import Finding, normalize
 from insidia.mask import bind_secrets, mask, reset_secrets
@@ -126,22 +127,23 @@ def execute(
         started = time.time()
         budget_token = bind_budget(project.targets)
         try:
-            return _run_targets(
-                project,
-                root,
-                policy,
-                mode,
-                model_available,
-                hits,
-                records,
-                controls,
-                skips,
-                progress,
-                snapshot,
-                started,
-                rerun_of,
-                accept_banner_only,
-            )
+            with confine(project.scope):
+                return _run_targets(
+                    project,
+                    root,
+                    policy,
+                    mode,
+                    model_available,
+                    hits,
+                    records,
+                    controls,
+                    skips,
+                    progress,
+                    snapshot,
+                    started,
+                    rerun_of,
+                    accept_banner_only,
+                )
         finally:
             reset_budget(budget_token)
     finally:

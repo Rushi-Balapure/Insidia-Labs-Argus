@@ -1,7 +1,8 @@
 """Child processes for engine installs and scans.
 
-The environment is an allowlist. Proxy variables and the parent process's
-secrets are not copied. A timeout kills the process group.
+The environment is an allowlist. A proxy supplied by the parent or the caller
+is not copied. While a scan is confined, the child is pointed at that scan's
+proxy. A timeout kills the process group.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from insidia.egress import Gate, current_gate
 from insidia.errors import EngineFailed, EngineTimeout
 
 _ALLOW = (
@@ -36,6 +38,14 @@ _ALLOW = (
     "USERPROFILE",
 )
 _PROXIES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+_PROXY_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
 
 
 def child_env(extra: Mapping[str, str]) -> dict[str, str]:
@@ -48,6 +58,11 @@ def child_env(extra: Mapping[str, str]) -> dict[str, str]:
         if _blocked(key):
             continue
         env[key] = value
+    gate = current_gate()
+    if gate is not None:
+        for key in _PROXY_KEYS:
+            env[key] = gate.url
+        env["INSIDIA_EGRESS_PROXY"] = gate.url
     return env
 
 
@@ -83,6 +98,8 @@ def run_command(
     name: str | None = None,
 ) -> tuple[int, str]:
     label = name or Path(argv[0]).name
+    gate = current_gate()
+    mark = 0 if gate is None else gate.mark()
     # katana and httpx read targets from stdin when it is a pipe. A closed
     # stdin keeps `insidia scan` pipelines and the MCP JSON-RPC stream intact.
     proc = subprocess.Popen(
@@ -99,6 +116,7 @@ def run_command(
         _stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
+        _leave_scope(gate, mark, label)
         raise EngineTimeout(f"{label} timed out") from None
     except KeyboardInterrupt:
         # The child is in its own session, so the terminal's SIGINT never reached it.
@@ -106,6 +124,7 @@ def run_command(
         raise
     code = proc.returncode
     detail = stderr.decode("utf-8", errors="replace").strip()
+    _leave_scope(gate, mark, label)
     return (1 if code is None else code), detail[-400:]
 
 
@@ -131,6 +150,17 @@ def launch_installed(invocation: object, workspace: Path) -> None:
     if code != 0 and not report.is_file():
         extra = f": {detail}" if detail else ""
         raise EngineFailed(f"{program.name} exited {code}{extra}")
+
+
+def _leave_scope(gate: Gate | None, mark: int, label: str) -> None:
+    if gate is None:
+        return
+    blocked = gate.since(mark)
+    if not blocked:
+        return
+    first = blocked[0]
+    more = f" and {len(blocked) - 1} more" if len(blocked) > 1 else ""
+    raise EngineFailed(f"{label} tried to leave scope: {first.host}:{first.port}{more}")
 
 
 def _blocked(key: str) -> bool:
