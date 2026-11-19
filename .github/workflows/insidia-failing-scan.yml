@@ -18,10 +18,21 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.head_ref == 'fix/n40' || github.ref == 'refs/heads/fix/n40'
     runs-on: ubuntu-latest
     steps:
+      # pull_request checks out the base commit. The PR head can replace
+      # insidia.yaml and this action, which then runs with the job token.
+      - name: Check out the base branch
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
       - name: Check out the tagged commit
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Start a vulnerable fixture
         shell: bash
@@ -66,7 +77,21 @@ jobs:
             exit 1
           fi
 
+      - name: Read the scan config from the base branch
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          rm -f insidia.yaml
+          if git cat-file -e "${BASE_SHA}:insidia.yaml"; then
+            git show "${BASE_SHA}:insidia.yaml" > "$RUNNER_TEMP/insidia.yaml"
+            mv "$RUNNER_TEMP/insidia.yaml" insidia.yaml
+          fi
+
       - name: Write a local insidia.yaml
+        if: "github.event_name != 'pull_request' || hashFiles('insidia.yaml') == ''"
         shell: bash
         run: |
           set -euo pipefail

@@ -131,7 +131,7 @@ Use `insidia engines list` to see available engines. To add engines, name them e
 
 `insidia.yaml` holds your app's target and scope. Localhost is the default. Test only systems you own or have permission to test; every non-local host needs `authorized: true` in the scope and `--yes` when scanning.
 
-Keep credentials in environment variables and reference them with `secret_ref: env:APP_TOKEN`. Findings mask detected secrets, for example `[AWS_ACCESS_KEY len=20 fp=3f9a1c07]`.
+Keep credentials in environment variables whose names start with `INSIDIA_` and reference them with `secret_ref: env:INSIDIA_APP_TOKEN`. Insidia rejects any other variable name and does not read it. Findings mask detected secrets, for example `[AWS_ACCESS_KEY len=20 fp=3f9a1c07]`.
 
 [Configuration reference](https://insidialabs.com/docs/start/config/) · [Scope and permissions](https://insidialabs.com/docs/start/scope/) · [Run in CI](https://insidialabs.com/docs/guides/ci/)
 

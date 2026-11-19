@@ -14,6 +14,7 @@ from insidia.errors import ConfigError
 from insidia.scope import LOCAL_HOSTS, ScopeHost, hostname
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SECRET_ENV_PREFIX = "INSIDIA_"
 _KINDS = frozenset({"chat", "agent", "rag", "mcp", "web", "api", "repo"})
 _PROJECT_FIELDS = frozenset({"version", "policy", "coverage", "scope", "targets", "models"})
 _SCOPE_FIELDS = frozenset({"host", "authorized"})
@@ -231,12 +232,20 @@ def load_project(path: Path) -> Project:
 
 
 def validate_secret_ref(secret_ref: str) -> str:
-    """Return the environment variable name. Does not read its value."""
+    """Return the environment variable name. Does not read its value.
+
+    Only names that start with INSIDIA_ are accepted.
+    """
     if not secret_ref.startswith("env:"):
         raise ConfigError("secret_ref must look like env:NAME")
     name = secret_ref.removeprefix("env:")
     if not _ENV_NAME.fullmatch(name):
         raise ConfigError("secret_ref must name one environment variable")
+    if not name.startswith(_SECRET_ENV_PREFIX):
+        raise ConfigError(
+            f"{name} cannot be used as a secret. "
+            "Only environment variables that start with INSIDIA_ can be referenced"
+        )
     return name
 
 
