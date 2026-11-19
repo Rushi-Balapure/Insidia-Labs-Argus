@@ -33,5 +33,6 @@ def test_sdk_bridge_invokes_the_scanner(monkeypatch: pytest.MonkeyPatch) -> None
 
     found = run_cell.run_cell(cell)
     assert seen == [("jailbreak", 4321)]
-    assert [item.plant_id for item in found] == [cell.plant_ids[0]]
+    assert found.label == run_cell.SCANNER_PROVEN
+    assert [item.plant_id for item in found.findings] == [cell.plant_ids[0]]
     assert not hasattr(run_cell, "_sdk")

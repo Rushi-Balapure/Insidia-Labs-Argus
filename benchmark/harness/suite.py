@@ -30,14 +30,18 @@ def suite_ready(cell: Cell) -> bool:
     )
 
 
-def prove_suite(cell: Cell) -> list[Finding]:
+def suite_verified(cell: Cell) -> bool:
     proved = _PROVED.get(cell.attack)
     if proved is None:
         proved = _hit(cell.attack)
         _PROVED[cell.attack] = proved
-    if not proved:
+    return proved
+
+
+def prove_suite(cell: Cell) -> list[Finding]:
+    if not suite_verified(cell):
         return []
-    return [Finding(cell.plant_ids[0])]
+    return []
 
 
 def _hit(attack: str) -> bool:

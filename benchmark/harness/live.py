@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -448,7 +449,8 @@ _POSTED: set[tuple[str, str]] = set()
 _SEQ = 0
 _TOKEN: dict[tuple[str, BearerLogin | PublicKeyHs256], str] = {}
 _REPORT_ID = ""
-_PROVED: dict[tuple[str, str, str], bool] = {}
+_SCANNED: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+_KIND = {"juiceshop": "web", "vampi": "api", "crapi": "api", "dvga": "api"}
 
 
 def live_ready(cell: Cell) -> bool:
@@ -461,14 +463,181 @@ def live_ready(cell: Cell) -> bool:
 
 
 def prove_live(cell: Cell) -> list[Finding]:
+    from benchmark.harness.run_cell import _matched
+
     key = (cell.target, cell.attack, cell.conn)
-    proved = _PROVED.get(key)
-    if proved is None:
-        proved = _hit(cell)
-        _PROVED[key] = proved
-    if not proved:
+    recorded = _SCANNED.get(key)
+    if recorded is None:
+        recorded = _scan_live(cell)
+        _SCANNED[key] = recorded
+    return _matched(cell, recorded)
+
+
+def _gql(query: str) -> str:
+    return json.dumps({"query": query})
+
+
+_SHAPES: dict[tuple[str, str], tuple[str, str, str | None, tuple[tuple[str, str], ...]]] = {
+    ("juiceshop", "web.sqli"): (
+        "POST",
+        "/rest/user/login",
+        '{"email":"{{payload}}","password":"x"}',
+        (),
+    ),
+    ("juiceshop", "web.xss"): ("GET", "/rest/products/search", None, (("q", "{{payload}}"),)),
+    ("juiceshop", "api.bola_idor"): ("GET", "/rest/basket/{{payload}}", None, ()),
+    ("juiceshop", "api.bfla"): (
+        "POST",
+        "/api/Users",
+        (
+            '{"email":"insidia-scan@juice-sh.op","password":"Insidia1",'
+            '"passwordRepeat":"Insidia1","role":"{{payload}}"}'
+        ),
+        (),
+    ),
+    ("juiceshop", "auth.jwt_oauth_session"): (
+        "GET",
+        "/rest/user/whoami",
+        None,
+        (("q", "{{payload}}"),),
+    ),
+    ("vampi", "web.sqli"): ("GET", "/users/v1/{{payload}}", None, ()),
+    ("crapi", "web.ssrf"): (
+        "POST",
+        "/workshop/api/merchant/contact_mechanic",
+        '{"mechanic_api":"{{payload}}"}',
+        (),
+    ),
+    ("crapi", "api.bola_idor"): (
+        "GET",
+        "/workshop/api/mechanic/mechanic_report",
+        None,
+        (("report_id", "{{payload}}"),),
+    ),
+    ("crapi", "api.bfla"): (
+        "GET",
+        "/community/api/v2/community/posts/recent",
+        None,
+        (("q", "{{payload}}"),),
+    ),
+    ("crapi", "api.mass_assignment"): (
+        "PUT",
+        "/identity/api/v2/user/videos/1",
+        '{"videoName":"plant","conversion_params":"{{payload}}"}',
+        (),
+    ),
+    ("crapi", "auth.jwt_oauth_session"): (
+        "GET",
+        "/identity/api/v2/user/dashboard",
+        None,
+        (("q", "{{payload}}"),),
+    ),
+    ("dvga", "web.sqli"): (
+        "POST",
+        "/graphql",
+        _gql('{ pastes(filter:"{{payload}}") { title content } }'),
+        (),
+    ),
+    ("dvga", "web.cmdi"): ("POST", "/graphql", _gql('{ systemDebug(arg:"{{payload}}") }'), ()),
+    ("dvga", "web.ssrf"): (
+        "POST",
+        "/graphql",
+        _gql(
+            'mutation { importPaste(host:"{{payload}}", port:80, path:"/", '
+            'scheme:"http") { result } }'
+        ),
+        (),
+    ),
+    ("dvga", "api.bola_idor"): (
+        "POST",
+        "/graphql",
+        _gql('{ paste(id:"{{payload}}") { id title content } }'),
+        (),
+    ),
+    ("dvga", "api.bfla"): (
+        "POST",
+        "/graphql",
+        _gql('{ users(filter:"{{payload}}") { username } }'),
+        (),
+    ),
+    ("dvga", "auth.jwt_oauth_session"): (
+        "POST",
+        "/graphql",
+        _gql('{ me(token:"{{payload}}") { username } }'),
+        (),
+    ),
+}
+
+
+def _config_text(target: str, attack: str, port: int, token: str | None) -> str:
+    kind = _KIND[target]
+    method, path, body, query = _SHAPES[(target, attack)]
+    lines = [
+        "version: 1",
+        "policy: L1",
+        "coverage: standard",
+        "scope:",
+        "  - host: 127.0.0.1",
+        "targets:",
+        "  plant:",
+        f"    kind: {kind}",
+        f"    url: {json.dumps(f'http://127.0.0.1:{port}{path}')}",
+        f"    method: {method}",
+        "    timeout: 20",
+    ]
+    if body is not None:
+        lines.append(f"    request_template: {json.dumps(body)}")
+    if query:
+        lines.append("    query:")
+        lines.extend(f"      {key}: {json.dumps(value)}" for key, value in query)
+    headers = _header_lines(target, attack, token)
+    if headers:
+        lines.append("    headers:")
+        lines.extend(headers)
+    lines.extend(["    rate_limit:", "      rps: 10", "      concurrency: 1"])
+    return "\n".join(lines) + "\n"
+
+
+def _header_lines(target: str, attack: str, token: str | None) -> list[str]:
+    check = _CHECKS[(target, attack)].check
+    if not isinstance(check, HttpCheck):
         return []
-    return [Finding(cell.plant_ids[0])]
+    lines: list[str] = []
+    for name, value in check.headers:
+        if "{token}" in value:
+            if token is None:
+                continue
+            value = value.replace("{token}", token)
+        if "{report_id}" in value or "{seq}" in value:
+            continue
+        lines.append(f"      {name}: {json.dumps(value)}")
+    return lines
+
+
+def _scan_live(cell: Cell) -> list[dict[str, object]]:
+    from benchmark.harness.run_cell import _run_scan
+
+    case = _CHECKS[(cell.target, cell.attack)]
+    host = _ensure(case.app)
+    token = _prepare(case, host)
+    with _view(cell.conn, host) as port:
+        with tempfile.TemporaryDirectory(prefix="insidia-live-") as name:
+            root = Path(name)
+            (root / "insidia.yaml").write_text(
+                _config_text(cell.target, cell.attack, port, token),
+                encoding="utf-8",
+            )
+            toolchain = root / "toolchain"
+            toolchain.mkdir()
+            previous = os.environ.get("INSIDIA_TOOLCHAIN")
+            os.environ["INSIDIA_TOOLCHAIN"] = str(toolchain)
+            try:
+                return _run_scan(root)
+            finally:
+                if previous is None:
+                    os.environ.pop("INSIDIA_TOOLCHAIN", None)
+                else:
+                    os.environ["INSIDIA_TOOLCHAIN"] = previous
 
 
 def _hit(cell: Cell) -> bool:
