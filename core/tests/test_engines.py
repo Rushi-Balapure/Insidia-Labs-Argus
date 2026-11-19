@@ -34,7 +34,12 @@ from insidia.engines import (
     _download,
     _github,
     _mirrored_download_url,
+    _npm_script,
     _publish,
+    _require_lock_hashes,
+    _require_npm_integrity,
+    _venv_python,
+    _venv_script,
     install,
 )
 from insidia.errors import CliError, EngineFailed, EngineTimeout
@@ -939,6 +944,9 @@ def test_a_pinned_digest_is_checked_before_extract(
         monkeypatch.setenv("INSIDIA_ENGINE_MIRROR", mirror)
         assert urllib.parse.urlsplit(mirror).hostname == "127.0.0.1"
         assert install(("nuclei",)).startswith("installed nuclei")
+    warned = install(("nuclei",), allow_unverified=True)
+    assert "already installed" in warned
+    assert "--allow-unverified does not skip hash verification" in warned
     assert requested
     assert all(path.startswith("/projectdiscovery/nuclei/") for path in requested)
     program = tmp_path / "nuclei" / "bin" / "nuclei"
@@ -967,7 +975,7 @@ def test_a_digest_mismatch_is_not_installed(
     assert not (tmp_path / ".nuclei.staging").exists()
 
 
-def test_a_missing_pin_needs_allow_unverified(
+def test_a_missing_pin_cannot_be_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("INSIDIA_TOOLCHAIN", str(tmp_path))
@@ -977,17 +985,16 @@ def test_a_missing_pin_needs_allow_unverified(
     monkeypatch.setattr("insidia.engines.PINNED_SHA256", {})
     with _local_mirror(_nuclei_zip()) as (mirror, requested):
         monkeypatch.setenv("INSIDIA_ENGINE_MIRROR", mirror)
-        with pytest.raises(CliError, match="--allow-unverified"):
+        with pytest.raises(CliError, match="no SHA-256 pin"):
             install(("nuclei",))
         assert not (tmp_path / "nuclei").exists()
         assert urllib.parse.urlsplit(mirror).hostname == "127.0.0.1"
-        assert install(("nuclei",), allow_unverified=True).startswith("installed nuclei")
+        with pytest.raises(CliError, match="does not skip hash verification"):
+            install(("nuclei",), allow_unverified=True)
     assert requested
     assert all(path.startswith("/projectdiscovery/nuclei/") for path in requested)
-    program = tmp_path / "nuclei" / "bin" / "nuclei"
-    assert program.is_file()
-    if os.name != "nt":
-        assert program.stat().st_mode & 0o111
+    assert not (tmp_path / "nuclei").exists()
+    assert not (tmp_path / ".nuclei.staging").exists()
 
 
 def _linux_amd64(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1206,6 +1213,264 @@ def test_nuclei_archive_follows_the_host(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(platform, "machine", lambda: "AMD64")
     assert _github(spec).endswith("nuclei_3.11.1_windows_amd64.zip")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    with pytest.raises(CliError, match="no nuclei build"):
+        _github(spec)
+
+
+def test_binary_archives_follow_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    trivy = next(item for item in SPECS if item.name == "trivy")
+    gitleaks = next(item for item in SPECS if item.name == "gitleaks")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    assert _github(trivy).endswith("trivy_0.75.0_macOS-ARM64.tar.gz")
+    assert _github(gitleaks).endswith("gitleaks_8.30.1_darwin_arm64.tar.gz")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    assert _github(trivy).endswith("trivy_0.75.0_windows-64bit.zip")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    with pytest.raises(CliError, match="no trivy build"):
+        _github(trivy)
+
+
+def test_unknown_cpu_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(platform, "machine", lambda: "mips64")
+    spec = next(item for item in SPECS if item.name == "nuclei")
+    with pytest.raises(CliError, match="no nuclei build for mips64"):
+        _github(spec)
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"),
+    [
+        ("linux", "x86_64"),
+        ("linux", "aarch64"),
+        ("darwin", "x86_64"),
+        ("darwin", "arm64"),
+        ("win32", "AMD64"),
+        ("win32", "ARM64"),
+    ],
+)
+def test_every_download_url_is_pinned(
+    monkeypatch: pytest.MonkeyPatch, system: str, machine: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", system)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+    archived = [
+        spec
+        for spec in SPECS
+        if spec.name
+        in {
+            "nuclei",
+            "dalfox",
+            "katana",
+            "httpx",
+            "trivy",
+            "osv-scanner",
+            "gitleaks",
+            "gosec",
+            "zap",
+        }
+    ]
+    for spec in archived:
+        try:
+            url = _github(spec)
+        except CliError as exc:
+            assert str(exc).startswith("no ")
+            continue
+        assert url in PINNED_SHA256
+
+
+def test_a_lock_without_hashes_is_refused(tmp_path: Path) -> None:
+    lock = tmp_path / "pyrit.txt"
+    lock.write_text("pyrit==1.1.0\n", encoding="utf-8")
+    with pytest.raises(CliError, match="SHA-256"):
+        _require_lock_hashes(lock)
+
+
+def test_a_git_ref_in_a_lock_is_refused(tmp_path: Path) -> None:
+    lock = tmp_path / "skillspector.txt"
+    lock.write_text(
+        "skillspector @ git+https://github.com/NVIDIA/SkillSpector.git@v2.12.0 \\\n"
+        f"    --hash=sha256:{'ab' * 32}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CliError, match="git tag can be moved"):
+        _require_lock_hashes(lock)
+
+
+def test_an_npm_lock_without_integrity_is_refused(tmp_path: Path) -> None:
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {},
+                    "node_modules/promptfoo": {"version": "0.124.0", "resolved": "https://example"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CliError, match="integrity"):
+        _require_npm_integrity(lock)
+
+
+def _hashed_lock(name: str, version: str) -> str:
+    return f"{name}=={version} \\\n    --hash=sha256:{'cd' * 32}\n"
+
+
+def _fake_uv(
+    commands: list[list[str]], *, fail: str = ""
+) -> object:
+    def checked(command: list[str], env: dict[str, str]) -> None:
+        del env
+        commands.append(command)
+        if "venv" in command[:3]:
+            python = _venv_python(Path(command[-1]).parent)
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_bytes(b"")
+            return
+        if "--require-hashes" not in command:
+            return
+        if fail:
+            raise CliError(fail)
+        stage = Path(command[command.index("--python") + 1]).parents[2]
+        for program in ("garak", "bandit", "mcp-scanner", "skillspector", "nuguard", "python"):
+            path = stage / _venv_script(program)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"")
+
+    return checked
+
+
+def test_python_install_passes_require_hashes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "pyrit.txt").write_text(_hashed_lock("pyrit", "1.1.0"), encoding="utf-8")
+    (locks / "garak.txt").write_text(_hashed_lock("garak", "0.17.0"), encoding="utf-8")
+    monkeypatch.setattr("insidia.engines._locks_root", lambda: locks)
+    monkeypatch.setenv("INSIDIA_TOOLCHAIN", str(tmp_path / "tools"))
+    monkeypatch.setattr(
+        "insidia.engines.shutil.which", lambda name: "/bin/uv" if name == "uv" else None
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr("insidia.engines._checked", _fake_uv(commands))
+    assert install(("pyrit",)).startswith("installed pyrit")
+    assert install(("garak",)).startswith("installed garak")
+    installs = [command for command in commands if "--require-hashes" in command]
+    assert len(installs) == 2
+    assert installs[0][installs[0].index("-r") + 1].endswith("pyrit.txt")
+    garak = installs[1]
+    assert "--torch-backend" in garak
+    assert garak[garak.index("--torch-backend") + 1] == "cpu"
+    assert garak[garak.index("-r") + 1].endswith("garak.txt")
+
+
+def test_a_python_hash_mismatch_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "bandit.txt").write_text(_hashed_lock("bandit", "1.9.4"), encoding="utf-8")
+    monkeypatch.setattr("insidia.engines._locks_root", lambda: locks)
+    monkeypatch.setenv("INSIDIA_TOOLCHAIN", str(tmp_path / "tools"))
+    monkeypatch.setattr(
+        "insidia.engines.shutil.which", lambda name: "/bin/uv" if name == "uv" else None
+    )
+    monkeypatch.setattr(
+        "insidia.engines._checked",
+        _fake_uv([], fail="uv exited 1: No matching hash"),
+    )
+    with pytest.raises(CliError, match="No matching hash"):
+        install(("bandit",))
+    assert not (tmp_path / "tools" / "bandit").exists()
+    assert not (tmp_path / "tools" / ".bandit.staging").exists()
+
+
+def test_a_lock_without_hashes_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    (locks / "deepteam.txt").write_text("deepteam==1.0.9\n", encoding="utf-8")
+    monkeypatch.setattr("insidia.engines._locks_root", lambda: locks)
+    monkeypatch.setenv("INSIDIA_TOOLCHAIN", str(tmp_path / "tools"))
+
+    def checked(command: list[str], env: dict[str, str]) -> None:
+        del command, env
+        raise AssertionError("uv was called")
+
+    monkeypatch.setattr("insidia.engines._checked", checked)
+    with pytest.raises(CliError, match="SHA-256"):
+        install(("deepteam",))
+    assert not (tmp_path / "tools" / ".deepteam.staging").exists()
+
+
+def test_promptfoo_install_uses_npm_ci(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    locks = tmp_path / "locks" / "promptfoo"
+    locks.mkdir(parents=True)
+    (locks / "package.json").write_text(
+        '{"private": true, "dependencies": {"promptfoo": "0.124.0"}}\n',
+        encoding="utf-8",
+    )
+    (locks / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"dependencies": {"promptfoo": "0.124.0"}},
+                    "node_modules/promptfoo": {
+                        "version": "0.124.0",
+                        "resolved": "https://registry.npmjs.org/promptfoo/-/promptfoo-0.124.0.tgz",
+                        "integrity": "sha512-" + ("A" * 32),
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("insidia.engines._locks_root", lambda: tmp_path / "locks")
+    monkeypatch.setenv("INSIDIA_TOOLCHAIN", str(tmp_path / "tools"))
+    monkeypatch.setattr(
+        "insidia.engines.shutil.which", lambda name: "/bin/npm" if name == "npm" else None
+    )
+    commands: list[list[str]] = []
+
+    def checked(command: list[str], env: dict[str, str]) -> None:
+        del env
+        commands.append(command)
+        stage = Path(command[command.index("--prefix") + 1])
+        binary = stage / _npm_script("promptfoo")
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("insidia.engines._checked", checked)
+    assert install(("promptfoo",)).startswith("installed promptfoo")
+    assert commands[0][:2] == ["/bin/npm", "ci"]
+    assert "install" not in commands[0][1:3]
+    assert "--ignore-scripts" in commands[0]
+    stage = tmp_path / "tools" / "promptfoo"
+    assert (stage / "package-lock.json").is_file()
+    assert json.loads((stage / "package-lock.json").read_text())["lockfileVersion"] == 3
+
+
+def test_shipped_engine_locks_are_hash_pinned() -> None:
+    root = Path(__file__).resolve().parents[1] / "insidia" / "locks"
+    names = ("garak", "pyrit", "deepteam", "bandit", "mcp-scanner", "nuguard", "skillspector")
+    for name in names:
+        text = (root / f"{name}.txt").read_text(encoding="utf-8")
+        assert "git+" not in text
+        _require_lock_hashes(root / f"{name}.txt")
+    garak = (root / "garak.txt").read_text(encoding="utf-8")
+    assert "torch==" in garak
+    assert "sentry-sdk==2.71.0" in (root / "deepteam.txt").read_text(encoding="utf-8")
+    _require_npm_integrity(root / "promptfoo" / "package-lock.json")
 
 
 _GARAK_STUB = """\

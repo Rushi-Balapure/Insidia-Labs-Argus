@@ -1,0 +1,7 @@
+{
+  "name": "insidia-promptfoo",
+  "private": true,
+  "dependencies": {
+    "promptfoo": "0.124.0"
+  }
+}

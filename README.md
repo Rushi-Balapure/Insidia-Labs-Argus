@@ -78,6 +78,10 @@ insidia upgrade --check   # only report whether a newer release exists
 insidia upgrade           # install the latest release
 ```
 
+`insidia upgrade` installs the wheel attached to the GitHub release after its SHA-256 matches the published checksum. It does not install from the git tag, because a tag can be moved.
+
+`insidia engines install` only installs hash-pinned engines. Python engines use a lock file, promptfoo uses `npm ci`, and each downloaded archive must match a pinned SHA-256. `--allow-unverified` does not turn those checks off.
+
 Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/Rushi-Balapure/Insidia-Labs-Argus/releases).
 
 ## Quickstart

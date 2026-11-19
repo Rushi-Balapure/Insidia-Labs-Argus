@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     install_parser.add_argument(
         "--allow-unverified",
         action="store_true",
-        help="install a downloaded binary that has no pinned SHA-256 for this platform",
+        help="does not skip hash checks; packages and downloads are always verified",
     )
 
     policy = subcommands.add_parser(
@@ -268,8 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         parents=[shared],
         help="install the latest release with the tool that installed Insidia",
         description=(
-            "Check GitHub for the latest release and reinstall Insidia from it "
-            "with uv, pipx, or pip, whichever installed this copy. "
+            "Check GitHub for the latest release and reinstall Insidia from the "
+            "published wheel after its SHA-256 matches the release checksum. "
             "Installed engines are kept."
         ),
     )
