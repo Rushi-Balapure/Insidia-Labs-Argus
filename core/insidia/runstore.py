@@ -111,6 +111,7 @@ def write_run(
     staging.mkdir(parents=True)
     verdict = policy_verdict or ("pass" if passed else "fail")
     passed = legacy_passed(execution_status, verdict)
+    low_assurance, assurance_reason = low_assurance_summary(verdict, controls)
     findings = _stamp_targets(prepare_findings(findings), targets)
     if config_text is not None:
         config_digest = hashlib.sha256(config_text).hexdigest()
@@ -138,7 +139,7 @@ def write_run(
         newline="",
     )
     (staging / "results.sarif").write_text(
-        json.dumps(_sarif(findings, controls, targets), indent=2) + "\n",
+        json.dumps(_sarif(findings, controls, targets, verdict), indent=2) + "\n",
         encoding="utf-8",
     )
     scores = score_frameworks(controls)
@@ -148,6 +149,8 @@ def write_run(
         "passed": passed,
         "execution_status": execution_status,
         "policy_verdict": verdict,
+        "low_assurance": low_assurance,
+        "assurance_reason": assurance_reason,
         "controls": controls,
         "skips": skips,
         "scores": [asdict(score) for score in scores],
@@ -206,6 +209,8 @@ def write_run(
             new_count=sum(1 for item in tracked if item.state == "new"),
             still_open_count=sum(1 for item in tracked if item.state == "still_open"),
             fixed_count=len(fixed),
+            low_assurance=low_assurance,
+            assurance_reason=assurance_reason,
         )
     )
     (staging / "report.html").write_text(html, encoding="utf-8")
@@ -221,6 +226,8 @@ def write_run(
         "policy": policy,
         "execution_status": execution_status,
         "policy_verdict": verdict,
+        "low_assurance": low_assurance,
+        "assurance_reason": assurance_reason,
         "config_digest": config_digest,
         "coverage": coverage,
         "models": {"judge": judge},
@@ -546,6 +553,35 @@ def not_tested(controls: list[dict[str, str | int]]) -> int:
     return sum(1 for control in controls if control.get("result") == "not tested")
 
 
+def low_assurance_summary(
+    verdict: str, controls: list[dict[str, str | int]]
+) -> tuple[bool, str]:
+    """Whether a passing run contains a low-assurance pass, and why."""
+
+    if verdict != "pass":
+        return False, ""
+    reasons: list[str] = []
+    low = False
+    for control in controls:
+        if control.get("result") != "pass" or control.get("assurance") != "low":
+            continue
+        low = True
+        text = control.get("assurance_reason", "")
+        if isinstance(text, str):
+            cleaned = text.strip()
+            if cleaned and cleaned not in reasons:
+                reasons.append(cleaned)
+    return low, "; ".join(reasons)
+
+
+def _pass_label(low_assurance: bool, assurance_reason: str) -> str:
+    if not low_assurance:
+        return "passed"
+    if assurance_reason:
+        return f"passed (low assurance: {assurance_reason})"
+    return "passed (low assurance)"
+
+
 def verdict_text(
     policy: str,
     passed: bool,
@@ -553,6 +589,8 @@ def verdict_text(
     execution_status: str = "complete",
     policy_verdict: str | None = None,
     untested: int = 0,
+    low_assurance: bool = False,
+    assurance_reason: str = "",
 ) -> str:
     verdict = policy_verdict or ("pass" if passed else "fail")
     label = "finding" if findings == 1 else "findings"
@@ -564,14 +602,15 @@ def verdict_text(
         if verdict == "fail":
             return f"The scan did not finish. Policy {policy} did not pass. {findings} {label}."
         return f"The scan did not finish. Policy {policy} is inconclusive."
+    outcome = _pass_label(low_assurance, assurance_reason)
     if verdict == "pass" and untested:
         checks = "check was" if untested == 1 else "checks were"
         return (
-            f"The scan ran. Policy {policy} passed with no findings, "
+            f"The scan ran. Policy {policy} {outcome} with no findings, "
             f"but {untested} {checks} not tested. See the report's coverage."
         )
     if verdict == "pass":
-        return f"The scan ran. Policy {policy} passed. No findings."
+        return f"The scan ran. Policy {policy} {outcome}. No findings."
     if verdict == "inconclusive":
         return f"The scan ran. Policy {policy} is inconclusive."
     return f"The scan ran. Policy {policy} did not pass. {findings} {label}."
@@ -731,6 +770,8 @@ class _ReportData:
     new_count: int = 0
     still_open_count: int = 0
     fixed_count: int = 0
+    low_assurance: bool = False
+    assurance_reason: str = ""
 
 
 def _render(report: _ReportData) -> str:
@@ -902,6 +943,9 @@ def _report_frameworks(controls: list[dict[str, str | int]], scores: tuple[Score
 
 
 def _report_scan_information(report: _ReportData) -> str:
+    verdict = report.verdict
+    if report.low_assurance:
+        verdict = _low_assurance_label(report.assurance_reason)
     return '<h2 id="scaninfo">Scan information</h2>\n' + _scan_table(
         report.run_id,
         report.started_at,
@@ -911,7 +955,7 @@ def _report_scan_information(report: _ReportData) -> str:
         report.policy,
         report.coverage_name,
         report.execution_status,
-        report.verdict,
+        verdict,
         report.scope_hosts,
         report.skips,
         report.config_digest,
@@ -1505,9 +1549,11 @@ def _coverage_target(name: str, controls: list[dict[str, str | int]], skips: lis
 
 def _coverage_check_row(control: dict[str, str | int], skips: list[str]) -> str:
     result = _control_text(control, "result")
+    reason = ""
     if result == "pass" and _control_text(control, "assurance") == "low":
+        reason = _control_text(control, "assurance_reason").strip()
         result = "pass (low assurance)"
-    badge = status_badge(result, uppercase=True)
+    badge = status_badge(result, uppercase=True, reason=reason)
     why = _coverage_why(control, skips)
     outcome = _control_outcome(control)
     explanation = untested_reason(why) if outcome == "not tested" else f"<p>{_escape(why)}</p>"
@@ -1879,6 +1925,7 @@ def _sarif_message(finding: Finding) -> str:
 
 
 _BANNER_RULE_ID = "insidia.infra.cve.banner"
+_LOW_RULE_ID = "insidia.low-assurance"
 
 
 def _sarif_banner_note(
@@ -1914,10 +1961,70 @@ def _banner_rule(warning: str) -> dict[str, object]:
     }
 
 
+def _low_assurance_label(reason: str) -> str:
+    if reason:
+        return f"pass (low assurance: {reason})"
+    return "pass (low assurance)"
+
+
+def _stamp_assurance(note: dict[str, object], control: dict[str, str | int]) -> None:
+    if control.get("result") != "pass" or control.get("assurance") != "low":
+        return
+    properties = note.get("properties")
+    if not isinstance(properties, dict):
+        return
+    properties["assurance"] = "low"
+    properties["low_assurance"] = True
+    reason = _control_text(control, "assurance_reason").strip()
+    if reason:
+        properties["assurance_reason"] = reason
+
+
+def _sarif_low_assurance_note(
+    control: dict[str, str | int], endpoints: dict[str, str]
+) -> dict[str, object] | None:
+    if control.get("result") != "pass" or control.get("assurance") != "low":
+        return None
+    if _banner_warning(control):
+        return None
+    reason = _control_text(control, "assurance_reason").strip()
+    target_name = _control_text(control, "target") or "target"
+    endpoint = endpoints.get(target_name, "") or target_name
+    family = _control_text(control, "id") or "check"
+    properties: dict[str, object] = {
+        "assurance": "low",
+        "low_assurance": True,
+        "family": family,
+        "security-severity": "0.0",
+    }
+    if reason:
+        properties["assurance_reason"] = reason
+    return {
+        "ruleId": _LOW_RULE_ID,
+        "level": "note",
+        "message": {"text": mask(_low_assurance_label(reason))},
+        "properties": properties,
+        "locations": [_endpoint_location(target_name, endpoint)],
+    }
+
+
+def _low_assurance_rule() -> dict[str, object]:
+    summary = "A passing check included a limited result."
+    return {
+        "id": _LOW_RULE_ID,
+        "name": "low-assurance",
+        "shortDescription": {"text": "Pass with low assurance"},
+        "fullDescription": {"text": summary},
+        "help": {"text": summary, "markdown": summary},
+        "properties": {"security-severity": "0.0", "tags": ["security"]},
+    }
+
+
 def _sarif(
     findings: list[Finding],
     controls: list[dict[str, str | int]] | None = None,
     targets: tuple[tuple[str, str, str], ...] = (),
+    verdict: str = "pass",
 ) -> dict[str, object]:
     rules = []
     seen: set[str] = set()
@@ -1940,16 +2047,27 @@ def _sarif(
         result["locations"] = [_sarif_result_location(finding)]
         results.append(result)
     endpoints = {name: endpoint for name, _kind, endpoint in targets}
+    low_notes: list[dict[str, object]] = []
     for control in controls or []:
         warning = _banner_warning(control)
         note = _sarif_banner_note(control, endpoints)
-        if not warning or note is None:
+        if warning and note is not None:
+            _stamp_assurance(note, control)
+            rule_id = _BANNER_RULE_ID
+            if rule_id not in seen:
+                seen.add(rule_id)
+                rules.append(_banner_rule(mask(warning)))
+            results.append(note)
             continue
-        rule_id = _BANNER_RULE_ID
-        if rule_id not in seen:
-            seen.add(rule_id)
-            rules.append(_banner_rule(mask(warning)))
-        results.append(note)
+        extra = _sarif_low_assurance_note(control, endpoints)
+        if extra is not None:
+            low_notes.append(extra)
+    if low_notes and _LOW_RULE_ID not in seen:
+        seen.add(_LOW_RULE_ID)
+        rules.append(_low_assurance_rule())
+    results.extend(low_notes)
+    low, reason = low_assurance_summary(verdict, list(controls or []))
+    properties: dict[str, object] = {"low_assurance": low, "assurance_reason": reason}
     return {
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -1957,6 +2075,7 @@ def _sarif(
             {
                 "tool": {"driver": {"name": "Insidia", "version": __version__, "rules": rules}},
                 "results": results,
+                "properties": properties,
             }
         ],
     }

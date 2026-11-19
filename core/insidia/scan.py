@@ -14,7 +14,7 @@ from insidia.errors import CliError, EngineFailed, ProbeError, ScopeError
 from insidia.findings import Finding, normalize
 from insidia.mask import bind_secrets, mask, reset_secrets
 from insidia.policy import MARKDOWN_BEACON, Policy, get_policy
-from insidia.probes import ProbeHit, _is_relay_shallow_note, reset_seen_replies, run
+from insidia.probes import ProbeHit, reset_seen_replies, run
 from insidia.registry import select, unlock_hint
 from insidia.results import (
     CANCELLED,
@@ -29,7 +29,14 @@ from insidia.results import (
     exit_for,
     legacy_passed,
 )
-from insidia.runstore import _format_epoch, config_snapshot, new_run_id, not_tested, write_run
+from insidia.runstore import (
+    _format_epoch,
+    config_snapshot,
+    low_assurance_summary,
+    new_run_id,
+    not_tested,
+    write_run,
+)
 from insidia.scope import check_url, needs_confirmation, unauthorized_host
 from insidia.transport import bind_budget, current_budget, preflight, repo_path, reset_budget
 from insidia.ui import Event, short
@@ -59,6 +66,8 @@ class ScanOutcome:
     untested: int = 0
     notes: tuple[str, ...] = ()
     started_at: str = ""
+    low_assurance: bool = False
+    assurance_reason: str = ""
 
     def exit_code(self) -> int:
         verdict = self.policy_verdict or ("pass" if self.passed else "fail")
@@ -393,19 +402,13 @@ def _scan_targets(
             recorded = _recorded(
                 policy, family, target.name, result, detail, probe_count, request_count
             )
-            # A one-prompt relay that missed is a pass with low assurance.
+            # A pass that includes a limited record is low assurance.
             # A banner with no built-in CVE match is the same shape when the flag is on.
             if result == "pass":
-                relay_notes = list(
-                    dict.fromkeys(
-                        record.reason
-                        for record in family_records
-                        if record.state == LIMITED and _is_relay_shallow_note(record.reason)
-                    )
-                )
-                if relay_notes:
+                grouped = aggregate(family_records)
+                if grouped.low_assurance:
                     recorded["assurance"] = "low"
-                    recorded["assurance_reason"] = "; ".join(relay_notes)
+                    recorded["assurance_reason"] = grouped.assurance_reason
                 elif banner_notes:
                     warning = "; ".join(dict.fromkeys(banner_notes))
                     recorded["assurance"] = "low"
@@ -434,6 +437,8 @@ def _scan_targets(
             shown = f"{', '.join(finished)} · {detail}" if finished and detail else detail
             raw_assurance = recorded.get("assurance", "")
             assurance = raw_assurance if isinstance(raw_assurance, str) else ""
+            raw_reason = recorded.get("assurance_reason", "")
+            assurance_reason = raw_reason if isinstance(raw_reason, str) else ""
             _say(
                 progress,
                 Event(
@@ -448,6 +453,7 @@ def _scan_targets(
                     counted=counted if result in {"pass", "fail"} and counted > 0 else None,
                     unit=unit if result in {"pass", "fail"} and counted > 0 else "",
                     assurance=assurance,
+                    assurance_reason=assurance_reason if assurance == "low" else "",
                 ),
             )
     _attribute_markdown_beacons(hits, records, controls)
@@ -509,9 +515,12 @@ def _finish(
     started_epoch: float,
     rerun_of: str = "",
 ) -> ScanOutcome:
-    execution_status, policy_verdict = aggregate(records)
+    grouped = aggregate(records)
+    execution_status = grouped.status
+    policy_verdict = grouped.verdict
     findings = normalize(hits)
     passed = legacy_passed(execution_status, policy_verdict)
+    low_assurance, assurance_reason = low_assurance_summary(policy_verdict, controls)
     run_id = new_run_id()
     _say(progress, Event("write", detail="Writing the report…"))
     run_dir = write_run(
@@ -545,6 +554,8 @@ def _finish(
         not_tested(controls),
         tuple(notes),
         started_at=_format_epoch(started_epoch),
+        low_assurance=low_assurance,
+        assurance_reason=assurance_reason,
     )
 
 
@@ -594,16 +605,16 @@ def _detail(result: str, reasons: list[str], records: list[CheckRecord]) -> str:
 
 
 def _family_result(records: list[CheckRecord]) -> str:
-    _status, verdict = aggregate(records)
-    if verdict == "fail":
+    grouped = aggregate(records)
+    if grouped.verdict == "fail":
         return "fail"
     if any(record.state == INFO for record in records) and not any(
         record.state == COMPLETE and record.finding_count == 0 for record in records
     ):
         return "info"
-    if _status == "complete" and verdict == "pass":
+    if grouped.status == "complete" and grouped.verdict == "pass":
         return "pass"
-    if _status == "complete":
+    if grouped.status == "complete":
         return "not tested"
     return "inconclusive"
 

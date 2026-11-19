@@ -5,6 +5,7 @@ from insidia.results import (
     COMPLETE,
     ERROR,
     INFO,
+    LIMITED,
     NOT_APPLICABLE,
     CheckRecord,
     aggregate,
@@ -82,3 +83,107 @@ def test_a_finding_still_fails_beside_info() -> None:
 def test_cancellation_exits_130() -> None:
     status, verdict = aggregate([CheckRecord("app", "web.ssti", "insidia", CANCELLED)])
     assert exit_for(status, verdict) == 130
+
+
+def test_a_pass_that_includes_a_limited_record_is_low_assurance() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "web.ssti", "zap", LIMITED, "zap sent one request"),
+    ]
+    result = aggregate(records)
+    status, verdict = result
+    assert (status, verdict, exit_for(status, verdict)) == ("complete", "pass", 0)
+    assert legacy_passed(status, verdict) is True
+    assert result.low_assurance is True
+    assert result.assurance_reason == "zap sent one request"
+
+
+def test_a_pass_with_only_complete_records_is_not_low_assurance() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "web.headers", "insidia", COMPLETE),
+    ]
+    result = aggregate(records)
+    status, verdict = result
+    assert (status, verdict, exit_for(status, verdict)) == ("complete", "pass", 0)
+    assert result.low_assurance is False
+    assert result.assurance_reason == ""
+
+
+def test_a_limited_record_outside_a_passing_check_does_not_lower_the_run() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "web.xss", "zap", LIMITED, "zap sent one request"),
+    ]
+    result = aggregate(records)
+    status, verdict = result
+    assert (status, verdict, exit_for(status, verdict)) == ("complete", "pass", 0)
+    assert result.low_assurance is False
+    assert result.assurance_reason == ""
+
+
+def test_a_limited_record_alone_is_not_a_low_assurance_pass() -> None:
+    result = aggregate([CheckRecord("app", "web.ssti", "zap", LIMITED, "zap sent one request")])
+    status, verdict = result
+    assert verdict != "pass"
+    assert legacy_passed(status, verdict) is False
+    assert exit_for(status, verdict) != 0
+    assert result.low_assurance is False
+
+
+def test_a_finding_beside_a_limited_record_stays_a_failure() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE, finding_count=1),
+        CheckRecord("app", "web.ssti", "zap", LIMITED, "zap sent one request"),
+    ]
+    result = aggregate(records)
+    status, verdict = result
+    assert (status, verdict, exit_for(status, verdict)) == ("complete", "fail", 1)
+    assert result.low_assurance is False
+
+
+def test_limited_reasons_in_one_pass_stay_in_order() -> None:
+    records = [
+        CheckRecord("bot", "ai.data_leakage", "insidia", COMPLETE),
+        CheckRecord("bot", "ai.data_leakage", "garak", LIMITED, "garak sent only 1 prompt(s)"),
+        CheckRecord("bot", "ai.data_leakage", "garak", LIMITED, "garak sent only 1 prompt(s)"),
+        CheckRecord(
+            "bot", "ai.data_leakage", "promptfoo", LIMITED, "promptfoo sent only 1 prompt(s)"
+        ),
+    ]
+    result = aggregate(records)
+    assert result.low_assurance is True
+    assert result.assurance_reason == (
+        "garak sent only 1 prompt(s); promptfoo sent only 1 prompt(s)"
+    )
+
+
+def test_a_limited_record_with_no_engine_name_still_flags_the_pass() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "web.ssti", "", LIMITED),
+    ]
+    result = aggregate(records)
+    assert result.low_assurance is True
+    assert result.assurance_reason == "limited"
+
+
+def test_a_limited_record_without_a_reason_names_the_engine() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "web.ssti", "zap", LIMITED),
+    ]
+    result = aggregate(records)
+    assert result.low_assurance is True
+    assert result.assurance_reason == "zap was limited"
+
+
+def test_info_beside_a_complete_pass_is_not_low_assurance() -> None:
+    records = [
+        CheckRecord("app", "web.ssti", "insidia", COMPLETE),
+        CheckRecord("app", "infra.cve", "insidia", INFO, "banner only"),
+    ]
+    result = aggregate(records)
+    status, verdict = result
+    assert (status, verdict, exit_for(status, verdict)) == ("complete", "pass", 0)
+    assert result.low_assurance is False

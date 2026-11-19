@@ -11,7 +11,7 @@ def escape(value: str) -> str:
     return html_escape(value, quote=True)
 
 
-def status_badge(result: str, uppercase: bool = False) -> str:
+def status_badge(result: str, uppercase: bool = False, reason: str = "") -> str:
     """Keep an explicit label alongside each status color and symbol."""
     css = {
         "pass": "pass",
@@ -21,8 +21,10 @@ def status_badge(result: str, uppercase: bool = False) -> str:
         "not tested": "nt",
     }.get(result, "nt")
     label = result.upper() if uppercase else result
-    if result == "pass (low assurance)" and uppercase:
-        label = "PASS (low assurance)"
+    if result == "pass (low assurance)":
+        label = "PASS (low assurance)" if uppercase else "pass (low assurance)"
+        if reason:
+            label = label[:-1] + f": {reason})"
     return f'<span class="res res-{css}">{escape(label or "not tested")}</span>'
 
 

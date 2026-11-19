@@ -437,6 +437,8 @@ def _finish_scan(
         untested=outcome.untested,
         run_id=outcome.run_id,
         started=outcome.started_at,
+        low_assurance=outcome.low_assurance,
+        assurance_reason=outcome.assurance_reason,
     )
     document = {
         "schema_version": "2.0",
@@ -444,6 +446,8 @@ def _finish_scan(
         "passed": outcome.passed,
         "execution_status": outcome.execution_status,
         "policy_verdict": outcome.policy_verdict or ("pass" if outcome.passed else "fail"),
+        "low_assurance": outcome.low_assurance,
+        "assurance_reason": outcome.assurance_reason,
         "findings": [finding.as_json() for finding in outcome.findings],
         "skips": outcome.skips,
         "run_dir": str(outcome.run_dir),
@@ -459,6 +463,8 @@ def _finish_scan(
             untested=outcome.untested,
             run_id=outcome.run_id,
             started=outcome.started_at,
+            low_assurance=outcome.low_assurance,
+            assurance_reason=outcome.assurance_reason,
         ),
     }
     if outcome.notes:
@@ -521,6 +527,8 @@ def scan_message(
     untested: int = 0,
     run_id: str = "",
     started: str = "",
+    low_assurance: bool = False,
+    assurance_reason: str = "",
 ) -> str:
     head = verdict_text(
         policy,
@@ -529,6 +537,8 @@ def scan_message(
         execution_status=execution_status,
         policy_verdict=policy_verdict,
         untested=untested,
+        low_assurance=low_assurance,
+        assurance_reason=assurance_reason,
     )
     if opened:
         body = f"{head} Opened {report}."
