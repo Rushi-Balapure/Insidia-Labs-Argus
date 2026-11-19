@@ -8,13 +8,9 @@ import pytest
 from insidia.findings import Finding, Observation
 from insidia.mask import mask
 from insidia.policy import MARKDOWN_BEACON, get_policy
-from insidia.runstore import (
-    _PLUGIN_OUTPUT_CAP,
-    _format_epoch,
-    local_time,
-    read_manifest,
-    write_run,
-)
+from insidia.report_html import _PLUGIN_OUTPUT_CAP
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import _format_epoch, local_time, write_run
 from insidia.score import coverage, score_frameworks
 
 _SECRET = "AKIAIOSFODNN7EXAMPLE"

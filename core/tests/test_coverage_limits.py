@@ -778,7 +778,7 @@ def test_probe_and_request_counts_match_the_loopback_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """One check's probes and requests equal what the loopback target logged."""
-    from insidia.runstore import _coverage_why
+    from insidia.report_html import _coverage_why
 
     recorder = _Recorder()
 
@@ -860,7 +860,7 @@ def test_zero_payload_counts_are_omitted_and_low_assurance_keeps_both() -> None:
     """A zero probe total is not printed. A low-assurance pass keeps the sent count."""
     import io
 
-    from insidia.runstore import _coverage_why
+    from insidia.report_html import _coverage_why
     from insidia.ui import Event, ScanView, Terminal, _payload_count
 
     stream = io.StringIO()
@@ -938,7 +938,7 @@ def test_a_repo_scan_prints_the_units_it_counted(tmp_path: Path) -> None:
     import io
 
     from insidia.config import load_project
-    from insidia.runstore import _coverage_why
+    from insidia.report_html import _coverage_why
     from insidia.scan import execute
     from insidia.ui import ScanView, Terminal
 
