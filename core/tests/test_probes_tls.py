@@ -59,41 +59,90 @@ def _closed_port() -> int:
     return port
 
 
+def _close_socket(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+class _Accepted:
+    """Sockets the accept loop still owns."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._socks: list[socket.socket] = []
+
+    def add(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.append(sock)
+
+    def drop(self, sock: socket.socket) -> None:
+        with self._lock:
+            try:
+                self._socks.remove(sock)
+            except ValueError:
+                pass
+
+    def close_all(self) -> None:
+        with self._lock:
+            socks = list(self._socks)
+            self._socks.clear()
+        for sock in socks:
+            _close_socket(sock)
+
+
+def _stop_server(
+    stop: threading.Event,
+    listener: socket.socket,
+    thread: threading.Thread,
+    accepted: _Accepted,
+) -> None:
+    stop.set()
+    _close_socket(listener)
+    accepted.close_all()
+    thread.join()
+    accepted.close_all()
+
+
 @contextmanager
 def _tcp_server(close: bool) -> Iterator[int]:
-    """Accept loopback connections. Close immediately, or hold them open."""
-    sock = socket.socket()
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen(16)
-    sock.settimeout(0.2)
-    port = int(sock.getsockname()[1])
+    """Accept loopback connections. Close immediately, or hold them until shutdown."""
+    listener = socket.socket()
+    accepted = _Accepted()
     stop = threading.Event()
-    held: list[socket.socket] = []
-
-    def serve() -> None:
-        while not stop.is_set():
-            try:
-                conn, _addr = sock.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-            if close:
-                conn.close()
-                continue
-            held.append(conn)
-
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
     try:
-        yield port
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(16)
+        listener.settimeout(0.2)
+        port = int(listener.getsockname()[1])
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _addr = listener.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    return
+                if close:
+                    _close_socket(conn)
+                    continue
+                accepted.add(conn)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            yield port
+        finally:
+            _stop_server(stop, listener, thread, accepted)
     finally:
-        stop.set()
-        sock.close()
-        for conn in held:
-            conn.close()
-        thread.join(1)
+        _close_socket(listener)
 
 
 def _client_offers(version: ssl.TLSVersion) -> bool:
@@ -150,43 +199,53 @@ def _tls_server(
     except (ValueError, ssl.SSLError) as exc:
         pytest.skip(f"this machine's OpenSSL cannot serve {minimum.name}: {exc}")
     context.load_cert_chain(cert, key)
-    sock = socket.socket()
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen(16)
-    sock.settimeout(0.2)
-    port = int(sock.getsockname()[1])
+    listener = socket.socket()
+    accepted = _Accepted()
     stop = threading.Event()
-
-    def serve() -> None:
-        while not stop.is_set():
-            try:
-                conn, _addr = sock.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-            try:
-                conn.settimeout(2)
-                with context.wrap_socket(conn, server_side=True) as tls:
-                    tls.recv(4096)
-                    tls.sendall(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-                    )
-            except (OSError, ssl.SSLError):
-                try:
-                    conn.close()
-                except OSError:
-                    pass
-
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
     try:
-        yield port
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(16)
+        listener.settimeout(0.2)
+        port = int(listener.getsockname()[1])
+
+        def serve() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _addr = listener.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    return
+                accepted.add(conn)
+                try:
+                    conn.settimeout(2)
+                    try:
+                        tls = context.wrap_socket(conn, server_side=True)
+                    except (OSError, ssl.SSLError):
+                        continue
+                    try:
+                        tls.recv(4096)
+                        tls.sendall(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                            b"Connection: close\r\n\r\nok"
+                        )
+                    except (OSError, ssl.SSLError):
+                        pass
+                    finally:
+                        _close_socket(tls)
+                finally:
+                    _close_socket(conn)
+                    accepted.drop(conn)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            yield port
+        finally:
+            _stop_server(stop, listener, thread, accepted)
     finally:
-        stop.set()
-        sock.close()
-        thread.join(1)
+        _close_socket(listener)
 
 
 def test_unreachable_port_is_not_tested(tmp_path: Path) -> None:
