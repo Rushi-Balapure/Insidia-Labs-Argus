@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -1555,6 +1557,79 @@ def test_baseline_uses_digest_then_target_names_and_skips_dot_dirs(tmp_path: Pat
     assert dotted_payload[0]["state"] == "new"
     assert dotted_payload[0]["first_seen_run"] == "run-c"
     assert "Fixed since" not in (dotted / "report.html").read_text(encoding="utf-8")
+
+
+def test_same_second_run_ids_follow_finish_order(tmp_path: Path) -> None:
+    """A later run in one UTC second can sort before the run it is compared with."""
+    root = tmp_path / "order"
+    early_id = "20261120T120000Z-ffffff"
+    recent_id = "20261120T120000Z-800000"
+    current_id = "20261120T120000Z-000000"
+    assert current_id < recent_id < early_id
+    early = _bare(title="Early finding", evidence_hash="hash-early")
+    recent = _bare(title="Recent finding", evidence_hash="hash-recent")
+    targets = (("shop", "web", "http://127.0.0.1/"),)
+
+    def yaml(port: int) -> bytes:
+        return f"version: 1\ntargets:\n  shop:\n    url: http://127.0.0.1:{port}/\n".encode()
+
+    early_dir = write_run(
+        root,
+        early_id,
+        "L1",
+        False,
+        [early],
+        [],
+        [],
+        config_text=yaml(1),
+        targets=targets,
+    )
+    recent_dir = write_run(
+        root,
+        recent_id,
+        "L1",
+        False,
+        [recent],
+        [],
+        [],
+        config_text=yaml(2),
+        targets=targets,
+    )
+    now_ns = time.time_ns()
+    os.utime(early_dir, ns=(now_ns - 10_000_000_000, now_ns - 10_000_000_000))
+    os.utime(recent_dir, ns=(now_ns - 5_000_000_000, now_ns - 5_000_000_000))
+    # Next UTC second, finished earlier on disk: a greater id must not become the baseline.
+    later_id = "20261120T120001Z-ffffff"
+    later_dir = write_run(
+        root,
+        later_id,
+        "L1",
+        False,
+        [early],
+        [],
+        [],
+        config_text=yaml(9),
+        targets=targets,
+    )
+    os.utime(later_dir, ns=(now_ns - 30_000_000_000, now_ns - 30_000_000_000))
+    directory = write_run(
+        root,
+        current_id,
+        "L1",
+        False,
+        [recent],
+        [],
+        [],
+        config_text=yaml(3),
+        targets=targets,
+    )
+    payload = json.loads((directory / "findings.json").read_text(encoding="utf-8"))
+    assert payload[0]["state"] == "still_open"
+    assert payload[0]["first_seen_run"] == recent_id
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    assert f"fixed since {recent_id}." in html
+    assert f"Fixed since {later_id}" not in html
+    assert "Early finding" not in html
 
 
 def test_still_open_without_first_seen_uses_the_baseline_run(tmp_path: Path) -> None:

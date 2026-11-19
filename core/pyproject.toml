@@ -64,5 +64,6 @@ source = ["insidia"]
 
 [tool.coverage.report]
 fail_under = 88
+precision = 2
 show_missing = true
 skip_covered = true
