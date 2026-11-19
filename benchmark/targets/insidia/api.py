@@ -14,7 +14,10 @@ def cmdi(user: str, state: State) -> str:
 
 
 def ssti(user: str, state: State) -> str:
-    return user.replace("{{7*7}}", "49")
+    rendered = user.replace("{{7*7}}", "49")
+    if rendered == user:
+        return "not rendered"
+    return rendered
 
 
 def path_lfi(user: str, state: State) -> str:
