@@ -8,7 +8,8 @@ from insidia.config import load_project
 from insidia.engines import install
 from insidia.findings import Finding
 from insidia.probes import Attempt
-from insidia.runstore import local_time, read_manifest, write_run
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import local_time, write_run
 from insidia.scan import ScanOutcome
 
 

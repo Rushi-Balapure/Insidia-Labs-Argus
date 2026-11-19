@@ -30,14 +30,9 @@ from insidia.results import (
     exit_for,
     legacy_passed,
 )
-from insidia.runstore import (
-    _format_epoch,
-    config_snapshot,
-    low_assurance_summary,
-    new_run_id,
-    not_tested,
-    write_run,
-)
+from insidia.run_assurance import low_assurance_summary, not_tested
+from insidia.run_config import config_snapshot
+from insidia.runstore import _format_epoch, new_run_id, write_run
 from insidia.scope import check_url, needs_confirmation, unauthorized_host
 from insidia.transport import bind_budget, current_budget, preflight, repo_path, reset_budget
 from insidia.ui import Event, short

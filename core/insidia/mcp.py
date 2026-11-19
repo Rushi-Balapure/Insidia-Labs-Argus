@@ -15,7 +15,8 @@ from insidia.doctor import diagnose
 from insidia.errors import CliError
 from insidia.mask import mask
 from insidia.policy import POLICIES
-from insidia.runstore import is_contained_run, latest_run, read_manifest
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import is_contained_run, latest_run
 from insidia.scan import execute
 from insidia.scope import needs_confirmation
 

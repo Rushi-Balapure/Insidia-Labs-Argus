@@ -22,7 +22,8 @@ from insidia.engines import install, list_engines
 from insidia.errors import CliError, ConfigError
 from insidia.mcp import serve
 from insidia.policy import POLICIES, get_policy
-from insidia.runstore import latest_run, local_time, read_manifest, verdict_text
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import latest_run, local_time, verdict_text
 from insidia.scan import execute
 from insidia.ui import InstallView, ScanView, Terminal
 from insidia.upgrade import upgrade

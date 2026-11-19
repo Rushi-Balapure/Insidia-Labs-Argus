@@ -21,7 +21,7 @@ from insidia.config import load_project
 from insidia.errors import CliError
 from insidia.mask import SECRET_PATTERNS, _secrets, bind_secrets, find_secret, mask
 from insidia.probes import Attempt, ProbeHit
-from insidia.runstore import config_snapshot
+from insidia.run_config import config_snapshot
 from insidia.scan import ScanOutcome, execute
 from tests.support import REPO, start_fixture, stop_fixture
 
