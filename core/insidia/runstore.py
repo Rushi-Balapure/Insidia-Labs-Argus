@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
+import html
 import io
 import json
 import re
@@ -701,7 +703,8 @@ def _render(report: _ReportData) -> str:
         f"<script data-report-ui>{REPORT_SCRIPT}</script>",
         "</body></html>",
     )
-    return "\n".join(part for part in parts if part) + "\n"
+    document = "\n".join(part for part in parts if part) + "\n"
+    return _with_content_security_policy(document)
 
 
 def _report_pages(report: _ReportData, names: list[str]) -> str:
@@ -1328,11 +1331,24 @@ def _reference_text(taxonomy: tuple[str, ...]) -> str:
     return " · ".join(labels) or "None"
 
 
+def _safe_href(url: str) -> str | None:
+    """http(s) or a same-document relative URL, escaped for an href attribute."""
+    if not url or any(ord(char) <= 32 or char == "\x7f" or char == "\\" for char in url):
+        return None
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme in {"http", "https"}:
+        return _escape(url) if parsed.netloc else None
+    if scheme or parsed.netloc or url.startswith("//") or ":" in url:
+        return None
+    return _escape(url)
+
+
 def _see_also(urls: tuple[str, ...]) -> str:
     links = []
     for url in urls:
-        if url.startswith(("https://", "http://")):
-            href = _escape(url).replace('"', "%22")
+        href = _safe_href(url)
+        if href is not None:
             links.append(f'<a href="{href}">{_escape(url)}</a>')
         elif url:
             links.append(_escape(url))
@@ -1351,7 +1367,7 @@ def _plugin_output(finding: Finding) -> str:
         affected = finding.location
     else:
         affected = finding.endpoint or finding.location or finding.target
-    kind = f" · {finding.target_kind}" if finding.target_kind else ""
+    kind = f" · {_escape(finding.target_kind)}" if finding.target_kind else ""
     cap = f" · truncated to {_PLUGIN_OUTPUT_CAP} characters" if truncated else ""
     lines = [
         f"<pre>{_escape(excerpt)}</pre>",
@@ -1457,7 +1473,7 @@ def _coverage_check_row(control: dict[str, str | int], skips: list[str]) -> str:
         if key in control
     )
     return (
-        f'<details class="check-accordion coverage-row" data-result="{outcome}">'
+        f'<details class="check-accordion coverage-row" data-result="{_escape(outcome)}">'
         '<summary><span class="check-name">'
         f"<code>{_escape(str(control.get('id', '')))}</code></span>"
         f'<span data-l="Result">{badge}</span><span class="accordion-cue">Details</span></summary>'
@@ -1718,7 +1734,40 @@ def _sarif_result_location(finding: Finding) -> dict[str, object]:
 
 
 def _escape(value: str) -> str:
-    return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return html.escape(value, quote=True)
+
+
+def _embedded_blocks(document: str, tag: str) -> list[str]:
+    return re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", document, flags=re.DOTALL)
+
+
+def _csp_hash(content: str) -> str:
+    digest = hashlib.sha256(content.encode("utf-8")).digest()
+    return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+
+def _content_security_policy(document: str) -> str:
+    def sources(tag: str) -> str:
+        hashes = [f"'{_csp_hash(body)}'" for body in dict.fromkeys(_embedded_blocks(document, tag))]
+        return " ".join(hashes) if hashes else "'none'"
+
+    return (
+        "default-src 'none'; "
+        "img-src data:; "
+        f"style-src {sources('style')}; "
+        f"script-src {sources('script')}; "
+        "base-uri 'none'; "
+        "form-action 'none'"
+    )
+
+
+def _with_content_security_policy(document: str) -> str:
+    meta = (
+        '<meta http-equiv="Content-Security-Policy" content="'
+        + _content_security_policy(document)
+        + '">'
+    )
+    return document.replace("<head>", "<head>" + meta, 1)
 
 
 def _sarif_tags(taxonomy: tuple[str, ...]) -> list[str]:
