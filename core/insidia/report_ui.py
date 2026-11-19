@@ -2,9 +2,13 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from html import escape
+from html import escape as html_escape
 
 from insidia.score import Score, coverage
+
+
+def escape(value: str) -> str:
+    return html_escape(value, quote=True)
 
 
 def status_badge(result: str, uppercase: bool = False) -> str:
@@ -91,21 +95,33 @@ def stacked_bar(segments: Sequence[tuple[str, int, str]], unit: str) -> str:
     """A proportional bar with focusable segments and complete textual values."""
     total = sum(count for _label, count, _css in segments)
     description = "; ".join(f"{label}: {count}" for label, count, _css in segments)
-    bars = "".join(
-        f'<span class="segment segment-{css}" style="width:{count / total * 100:.4f}%" '
-        f"{_tooltip_attrs(label, count, total, unit)}></span>"
-        for label, count, css in segments
-        if count and total
-    )
+    rules: list[str] = []
+    bars: list[str] = []
+    for label, count, css in segments:
+        if not count or not total:
+            continue
+        token, rule = _plot_rule(count / total * 100)
+        rules.append(rule)
+        bars.append(
+            f'<span class="segment segment-{css} {token}" '
+            f"{_tooltip_attrs(label, count, total, unit)}></span>"
+        )
+    style = f"<style>{''.join(dict.fromkeys(rules))}</style>" if rules else ""
     return (
         f'<div class="stacked-bar" role="group" aria-label="{escape(unit)}: '
-        f'{escape(description)}"><div class="bar-track">{bars}</div></div>'
+        f'{escape(description)}">{style}<div class="bar-track">{"".join(bars)}</div></div>'
     )
+
+
+def _plot_rule(percentage: float) -> tuple[str, str]:
+    width = f"{percentage:.4f}"
+    token = "plot-w-" + width.replace(".", "_")
+    return token, f".{token}{{width:{width}%}}"
 
 
 def _tooltip_attrs(label: str, count: int, total: int, unit: str) -> str:
     percentage = _coverage_percentage(CheckCounts(count, 0, 0, total - count))
-    value = escape(f"{label}: {count} of {total} {unit} ({percentage})", quote=True)
+    value = escape(f"{label}: {count} of {total} {unit} ({percentage})")
     return f'tabindex="0" role="img" aria-label="{value}" data-tooltip="{value}"'
 
 
@@ -169,8 +185,9 @@ def coverage_filter(content: str, counts: CheckCounts, prefix: str, unit: str) -
         selected = " checked" if value == "all" else ""
         control_id = f"{prefix}-{value}"
         controls.append(
-            f'<input type="radio" id="{control_id}" name="{prefix}" value="{value}"'
-            f'{selected}><label for="{control_id}">{label} ({count})</label>'
+            f'<input type="radio" id="{escape(control_id)}" name="{escape(prefix)}" '
+            f'value="{escape(value)}"{selected}><label for="{escape(control_id)}">'
+            f"{escape(label)} ({count})</label>"
         )
         if value != "all":
             outcome = "not tested" if value == "nt" else value
@@ -179,12 +196,15 @@ def coverage_filter(content: str, counts: CheckCounts, prefix: str, unit: str) -
                 f':not([data-result="{outcome}"]) {{ display: none; }}'
             )
         if count == 0:
-            empty.append(f'<p class="filter-empty empty-{value}">No {label.lower()} {unit}.</p>')
+            empty.append(
+                f'<p class="filter-empty empty-{value}">'
+                f"No {escape(label.lower())} {escape(unit)}.</p>"
+            )
             styles.append(
                 f"#{control_id}:checked ~ .filter-content .empty-{value} {{ display: block; }}"
             )
     return (
-        f'<fieldset class="coverage-filter"><legend>Filter {unit} by result</legend>'
+        f'<fieldset class="coverage-filter"><legend>Filter {escape(unit)} by result</legend>'
         f"<style>{''.join(styles)}</style>{''.join(controls)}"
         f'<div class="filter-content">{"".join(empty)}{content}</div></fieldset>'
     )
@@ -221,7 +241,8 @@ def tested_chart(counts: CheckCounts) -> str:
         f'<figure class="chart chart-tested{" chart-empty" if not counts.total else ""}">'
         "<figcaption>Test coverage</figcaption>"
         f'<div class="donut-wrap"><svg viewBox="0 0 120 120" role="group" '
-        f'aria-label="{description}"><circle class="donut-track" cx="60" cy="60" r="48"/>'
+        f'aria-label="{escape(description)}">'
+        '<circle class="donut-track" cx="60" cy="60" r="48"/>'
         + _donut_segments(counts)
         + '</svg><div class="donut-label" aria-hidden="true">'
         f"<strong>{escape(headline)}</strong><span>tested</span></div></div>"
@@ -311,18 +332,23 @@ def severity_chart(severities: Sequence[str]) -> str:
     for severity in severities:
         counts[severity if severity in bands else "info"] += 1
     highest = max(counts.values(), default=0)
-    rows = []
+    rows: list[str] = []
+    rules: list[str] = []
     for band, count in counts.items():
-        width = count / highest * 100 if highest else 0
+        width = count / highest * 100 if highest else 0.0
+        token, rule = _plot_rule(width)
+        rules.append(rule)
         rows.append(
             f'<div class="severity-row" data-count="{count}"><span>{band.title()}</span>'
-            f'<div class="bar-track" aria-hidden="true"><span class="segment segment-{band}" '
-            f'style="width:{width:.4f}%"></span></div><strong>{count}</strong></div>'
+            '<div class="bar-track" aria-hidden="true">'
+            f'<span class="segment segment-{band} {token}"></span></div>'
+            f"<strong>{count}</strong></div>"
         )
+    style = f"<style>{''.join(dict.fromkeys(rules))}</style>" if severities else ""
     body = "".join(rows) if severities else '<p class="note">No findings to chart for this run.</p>'
     return (
         '<figure class="chart chart-severity"><figcaption>Findings by severity</figcaption>'
-        f'{body}<p class="note">Total findings: {len(severities)}.</p></figure>'
+        f'{style}{body}<p class="note">Total findings: {len(severities)}.</p></figure>'
     )
 
 

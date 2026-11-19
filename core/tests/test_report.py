@@ -542,6 +542,145 @@ def test_finding_cards_list_fields_in_order_and_escape_evidence(tmp_path: Path) 
     assert "insidia rerun run-card" in card
 
 
+def test_report_escapes_untrusted_text_and_sets_content_security_policy(tmp_path: Path) -> None:
+    import base64
+    import hashlib
+    import re
+    from html.parser import HTMLParser
+    from urllib.parse import urlparse
+
+    from insidia.report_script import REPORT_SCRIPT
+
+    script_payload = '"><script>alert(1)</script>'
+    quote_payload = "' onmouseover='x"
+    script_break = "</script><script>alert(2)</script>"
+    javascript_url = "javascript:alert(1)"
+    quote_url = "https://example.com/'onmouseover='x"
+    endpoint = 'https://app.example/"onclick="alert(1)'
+    kind = '"><img src=x onerror=alert(1)>'
+    finding = _bare(
+        title=script_payload,
+        target=quote_payload,
+        response=script_break,
+        engine=script_payload,
+        confidence=quote_payload,
+        references=(
+            javascript_url,
+            "JavaScript:alert(1)",
+            quote_url,
+            "https://example.com/safe",
+            "http://example.com/also",
+            "//evil.example/phish",
+            "/relative/help",
+            "data:text/html,<script>alert(1)</script>",
+            "https://example.com/a\nb",
+        ),
+        location='notes"><script>alert(3)</script>.txt:4',
+        remediation=script_payload,
+        description=quote_payload,
+        synopsis=script_break,
+        observations=(
+            Observation(
+                "insidia",
+                "insidia.web.ssti",
+                "high",
+                "notes:1",
+                script_payload + quote_payload + script_break,
+            ),
+        ),
+    )
+    directory = write_run(
+        tmp_path,
+        "run-xss",
+        script_payload,
+        False,
+        [finding],
+        [
+            {
+                "id": script_payload,
+                "target": quote_payload,
+                "result": "not tested",
+                "detail": script_break,
+            }
+        ],
+        [script_break],
+        targets=((quote_payload, kind, endpoint),),
+    )
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    for payload in (script_payload, quote_payload, script_break, quote_url, endpoint, kind):
+        assert payload not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&#x27; onmouseover=&#x27;x" in html
+    assert "https://example.com/&#x27;onmouseover=&#x27;x" in html
+    assert "https://app.example/&quot;onclick=&quot;alert(1)" in html
+    assert 'href="https://example.com/safe"' in html
+    assert 'href="http://example.com/also"' in html
+    assert 'href="/relative/help"' in html
+    assert 'href="javascript:' not in html.lower()
+    assert "href='javascript:" not in html.lower()
+    assert 'href="//evil.example/phish"' not in html
+    assert "data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<img" not in html
+    assert re.search(r"\shref\s*=\s*[^\"']", html) is None
+
+    scripts = re.findall(r"<script\b([^>]*)>(.*?)</script>", html, flags=re.DOTALL)
+    assert scripts == [(" data-report-ui", REPORT_SCRIPT)]
+    for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html, flags=re.DOTALL):
+        assert script_break not in body
+        assert script_payload not in body
+    assert html.count("</script>") == 1
+    assert html.index("<head>") + len("<head>") == html.index(
+        '<meta http-equiv="Content-Security-Policy"'
+    )
+    assert html.index("Content-Security-Policy") < html.index("<style>")
+    match = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]*)"', html)
+    assert match is not None
+    policy = match.group(1)
+    assert policy.startswith("default-src 'none'; img-src data:; style-src ")
+    assert "base-uri 'none'; form-action 'none'" in policy
+    assert policy.endswith("base-uri 'none'; form-action 'none'")
+    assert "unsafe-inline" not in policy
+    assert "frame-ancestors" not in policy
+
+    def source_hash(content: str) -> str:
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+    for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html, flags=re.DOTALL):
+        assert f"'{source_hash(body)}'" in policy
+    assert f"'{source_hash(REPORT_SCRIPT)}'" in policy
+    style_src = policy.split("style-src ", 1)[1].split(";", 1)[0]
+    script_src = policy.split("script-src ", 1)[1].split(";", 1)[0]
+    assert style_src.count("'sha256-") >= 1
+    assert script_src == f"'{source_hash(REPORT_SCRIPT)}'"
+    assert 'id="check-filter-all"' in html
+
+    class _Audit(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.hrefs: list[str] = []
+            self.scripts = 0
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            names = [name.lower() for name, _value in attrs]
+            assert not any(name.startswith("on") for name in names)
+            if tag == "script":
+                self.scripts += 1
+            for name, value in attrs:
+                if name.lower() == "href":
+                    href = value or ""
+                    self.hrefs.append(href)
+                    assert urlparse(href).scheme.lower() in {"", "http", "https"}
+
+    auditor = _Audit()
+    auditor.feed(html)
+    assert auditor.scripts == 1
+    assert javascript_url not in auditor.hrefs
+    assert all(not href.lower().startswith("javascript:") for href in auditor.hrefs)
+    assert quote_url in auditor.hrefs
+    assert "https://example.com/safe" in auditor.hrefs
+
+
 def test_finding_card_shows_confidence_for_one_and_two_engines(tmp_path: Path) -> None:
     leaked = "ghp_" + ("b" * 36)
     shared = _bare(
