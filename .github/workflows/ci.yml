@@ -2,13 +2,31 @@ name: ci
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "*.rst"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "*.rst"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   matrix:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv python install 3.14
         working-directory: benchmark
@@ -39,25 +57,40 @@ jobs:
         working-directory: benchmark
 
   core:
-    name: core (${{ matrix.os }})
+    name: core (${{ matrix.os }}, ${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
+        python-version: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     defaults:
       run:
         working-directory: core
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: uv python install 3.12
-      - run: uv sync
+        with:
+          enable-cache: true
+          cache-dependency-glob: core/uv.lock
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --locked
       - run: uv run ruff check .
-        if: runner.os == 'Linux'
       - run: uv run mypy insidia
-        if: runner.os == 'Linux'
-      - run: uv run pytest
+      - run: uv run pytest -n auto --cov --cov-report=term --cov-report=xml:coverage.xml
       - run: uv build --wheel
-        if: runner.os == 'Linux'
-
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: core/coverage.xml
+          env_vars: OS,PYTHON
+          fail_ci_if_error: false
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
+          name: codecov-umbrella
+        env:
+          OS: ${{ matrix.os }}
+          PYTHON: ${{ matrix.python-version }}

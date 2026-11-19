@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -139,7 +140,7 @@ def _blocked(key: str) -> bool:
 
 def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             proc.kill()
         else:
             os.killpg(proc.pid, signal.SIGKILL)
