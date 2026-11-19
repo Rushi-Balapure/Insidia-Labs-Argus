@@ -49,6 +49,10 @@ class ScannerNotBuilt(Exception):
         super().__init__(f"{cell.cell_id} is owned by phase {cell.phase} and has no scanner yet")
 
 
+class ScanError(Exception):
+    """The scan did not finish. An empty finding list would be a false negative."""
+
+
 @dataclass(frozen=True)
 class SandboxCall:
     """One planted function the built-in probes can hit."""
@@ -419,18 +423,73 @@ targets:
 
 
 def _run_scan(root: Path) -> list[dict[str, object]]:
+    _ensure_insidia_import()
     from insidia.cli import main
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        main(["scan", "--config", str(root / "insidia.yaml"), "--coverage", "standard"])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(
+                [
+                    "scan",
+                    "--config",
+                    str(root / "insidia.yaml"),
+                    "--coverage",
+                    "standard",
+                    "--quiet",
+                ]
+            )
+    except SystemExit as exc:
+        raise ScanError(f"scan exited via SystemExit {exc.code}") from exc
+    except Exception as exc:
+        raise ScanError(f"scan crashed: {exc}") from exc
+    if not isinstance(code, int):
+        raise ScanError(f"scan returned {code!r}")
+    return _completed_findings(root, code)
+
+
+def _completed_findings(root: Path, code: int) -> list[dict[str, object]]:
+    if code == 130:
+        raise ScanError("scan was cancelled")
+    run = _latest_run(root)
+    if run is None:
+        raise ScanError(f"scan exited {code} without a run")
+    status, verdict, findings = _read_run(run)
+    if status == "cancelled":
+        raise ScanError("scan was cancelled")
+    if code == 1 and findings:
+        return findings
+    if code == 0 and status == "complete" and verdict == "pass":
+        return findings
+    raise ScanError(f"scan exited {code} with status {status} and verdict {verdict}")
+
+
+def _latest_run(root: Path) -> Path | None:
     runs = root / ".insidia" / "runs"
     if not runs.is_dir():
-        return []
-    latest = max(runs.iterdir(), key=lambda path: path.name)
-    payload = json.loads((latest / "findings.json").read_text())
-    if not isinstance(payload, list):
-        return []
-    return [item for item in payload if isinstance(item, dict)]
+        return None
+    finished = [path for path in runs.iterdir() if path.is_dir() and not path.name.startswith(".")]
+    if not finished:
+        return None
+    return max(finished, key=lambda path: path.name)
+
+
+def _read_run(run: Path) -> tuple[str, str, list[dict[str, object]]]:
+    benchmark = run / "benchmark.json"
+    recorded = run / "findings.json"
+    if not benchmark.is_file() or not recorded.is_file():
+        raise ScanError(f"{run.name} is missing benchmark.json or findings.json")
+    try:
+        status_doc = json.loads(benchmark.read_text(encoding="utf-8"))
+        payload = json.loads(recorded.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ScanError(f"{run.name} has unreadable results") from exc
+    if not isinstance(status_doc, dict) or not isinstance(payload, list):
+        raise ScanError(f"{run.name} has unexpected results")
+    status = status_doc.get("execution_status")
+    verdict = status_doc.get("policy_verdict")
+    if not isinstance(status, str) or not isinstance(verdict, str):
+        raise ScanError(f"{run.name} has no execution status")
+    return status, verdict, [item for item in payload if isinstance(item, dict)]
 
 
 atexit.register(_shutdown_sandbox)
