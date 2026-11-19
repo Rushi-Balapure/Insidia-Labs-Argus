@@ -1170,7 +1170,7 @@ def test_low_assurance_passes_are_counted_from_the_field(tmp_path: Path) -> None
     assert _owasp_result(html, "owasp-web:A03") == "pass (low assurance)"
     assert _owasp_result(html, "owasp-web:A05") == "pass"
     weak_badge = _coverage_badge(html, "web.ssti")
-    assert "PASS (low assurance)" in weak_badge
+    assert f"PASS (low assurance: {note})" in weak_badge
     assert "res-low" in weak_badge
     assert "res-pass" not in weak_badge
     full_badge = _coverage_badge(html, "web.headers")
