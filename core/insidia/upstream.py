@@ -7,7 +7,10 @@ import os
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+
+import yaml  # type: ignore[import-untyped]
 
 from insidia.adapters import (
     EngineHit,
@@ -764,46 +767,65 @@ def _nuclei_yaml(path: str) -> str:
     # Nuclei treats a path without a scheme as a URL and refuses it. BaseURL
     # is its own placeholder for the scoped origin. The payload stays encoded.
     # A matcher is required or nuclei writes no result.
-    return (
-        "id: insidia-web-ssti\n"
-        "info:\n"
-        "  name: insidia ssti\n"
-        "  author: insidia\n"
-        "  severity: high\n"
-        "http:\n"
-        "  - method: GET\n"
-        "    path:\n"
-        f'      - "{{{{BaseURL}}}}{path}"\n'
-        "    matchers:\n"
-        "      - type: word\n"
-        "        part: body\n"
-        "        words:\n"
-        '          - "49"\n'
-    )
+    template = {
+        "id": "insidia-web-ssti",
+        "info": {
+            "name": "insidia ssti",
+            "author": "insidia",
+            "severity": "high",
+        },
+        "http": [
+            {
+                "method": "GET",
+                "path": ["{{BaseURL}}" + path],
+                "matchers": [
+                    {
+                        "type": "word",
+                        "part": "body",
+                        "words": ["49"],
+                    }
+                ],
+            }
+        ],
+    }
+    return cast(str, yaml.safe_dump(template, sort_keys=False, default_flow_style=False))
 
 
 def _zap_plan(url: str, workspace: Path, report: str) -> str:
-    return (
-        "env:\n"
-        "  contexts:\n"
-        "    - name: insidia\n"
-        "      urls:\n"
-        f"        - {url}\n"
-        "  parameters:\n"
-        "    failOnError: false\n"
-        "    progressToStdout: false\n"
-        "jobs:\n"
-        "  - type: requestor\n"
-        "    requests:\n"
-        "      - url: "
-        f"{url}\n"
-        "        method: GET\n"
-        "  - type: report\n"
-        "    parameters:\n"
-        "      template: traditional-json\n"
-        f"      reportDir: {workspace}\n"
-        f"      reportFile: {report}\n"
-    )
+    plan = {
+        "env": {
+            "contexts": [
+                {
+                    "name": "insidia",
+                    "urls": [url],
+                }
+            ],
+            "parameters": {
+                "failOnError": False,
+                "progressToStdout": False,
+            },
+        },
+        "jobs": [
+            {
+                "type": "requestor",
+                "requests": [
+                    {
+                        "url": url,
+                        "method": "GET",
+                    }
+                ],
+            },
+            {
+                "type": "report",
+                "parameters": {
+                    "template": "traditional-json",
+                    "reportDir": str(workspace),
+                    "reportFile": report,
+                },
+            },
+        ],
+    }
+    return cast(str, yaml.safe_dump(plan, sort_keys=False, default_flow_style=False))
 
 
 def _vuln_db_flags(*flags: str) -> tuple[str, ...]:
