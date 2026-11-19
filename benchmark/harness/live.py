@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import subprocess
 import time
 import urllib.error
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+from benchmark.harness.egress_guard import CANARY_URL, ProbeResult, evaluate
+from benchmark.harness.sandbox import SandboxOpen, assert_closed, load_compose
 from benchmark.harness.score import Finding
 from benchmark.matrix.registry import Cell
 
@@ -31,6 +34,10 @@ _DVGA_IMAGE = (
     "dolevf/dvga@sha256:"
     "040aa33c199d99f3380c9ff9a1ee5d725e9abca7b189c63a35a2a73bda79c957"
 )
+_CHROME_IMAGE = (
+    "zenika/alpine-chrome@sha256:"
+    "eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d"
+)
 _CRAPI_ADMIN = (
     "eyJhbGciOiJIUzI1NiIsImtpZCI6Ii9kZXYvbnVsbCJ9."
     "eyJzdWIiOiJhZG1pbkBleGFtcGxlLmNvbSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoyMDAwMDAwMDAwLCJyb2xlIjoiYWRtaW4ifQ."
@@ -43,7 +50,10 @@ _DVGA_ADMIN = (
     "-56ZQN9jikpuuhpjHjy3vLvdwbtySs0mbdaSq-9RVGg"
 )
 _JSON = (("Content-Type", "application/json"),)
-_PROJECT = "insidia-live"
+_BENCH_LABEL = "insidia.benchmark=1"
+_EGRESS_MARK = "insidia-egress:"
+_IP_PROBE = f"wget -q -T 3 -O /dev/null http://1.1.1.1/; echo {_EGRESS_MARK}$?"
+_DNS_PROBE = f"nslookup example.com >/dev/null 2>&1; echo {_EGRESS_MARK}$?"
 _XSS_PATH = (
     "/#/search?q=%3Cimg%20src%3Dx%20onerror%3Ddocument.title%3D%22insidia-xss%22%3E"
 )
@@ -441,7 +451,9 @@ _CHECKS: dict[tuple[str, str], LiveCase] = {
 }
 
 _STARTED: list[str] = []
-_COMPOSE: tuple[Path, str] | None = None
+_COMPOSE: tuple[Path, Path, str] | None = None
+_PROJECT_ID = ""
+_READY = False
 _HOST_PORT: dict[str, int] = {}
 _ONCE: set[str] = set()
 _POSTED: set[tuple[str, str]] = set()
@@ -747,44 +759,60 @@ def _exchange(
         return int(exc.code), exc.read()
 
 
-def _dom(port: int, check: DomCheck) -> bool:
-    url = f"http://127.0.0.1:{port}{check.path}"
+def _dom(_port: int, check: DomCheck) -> bool:
+    url = f"http://{_JUICE.name}:{_JUICE.container_port}{check.path}"
     for _ in range(8):
         result = _chrome(url)
         if check.marker in result.stdout:
             return True
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(f"google-chrome exited {result.returncode}: {detail[-1500:]}")
+            raise RuntimeError(f"chrome exited {result.returncode}: {detail[-1500:]}")
     return False
 
 
 def _chrome(url: str) -> subprocess.CompletedProcess[str]:
+    name = _container_name("chrome")
     argv = [
-        "google-chrome",
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        name,
+        "--network",
+        _sandbox_network(),
+        "--label",
+        _BENCH_LABEL,
+        "--label",
+        _project_label(),
+        "--entrypoint",
+        "chromium-browser",
+        _CHROME_IMAGE,
         "--headless=new",
         "--disable-gpu",
         "--no-sandbox",
+        "--disable-dev-shm-usage",
         "--timeout=8000",
         "--virtual-time-budget=5000",
         "--dump-dom",
         url,
     ]
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
     try:
-        stdout, stderr = proc.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-        # The DOM is already in stdout. Chrome stays up on a slow tunnel.
-        code = 0 if stdout else -9
-        return subprocess.CompletedProcess(argv, code, stdout or "", stderr or "")
-    return subprocess.CompletedProcess(argv, proc.returncode or 0, stdout, stderr)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired as exc:
+        subprocess.run(
+            ["docker", "rm", "-f", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode()
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode()
+        return subprocess.CompletedProcess(argv, 0 if stdout else -9, stdout, stderr)
 
 
 def _ensure(app: RunApp | ComposeApp) -> int:
@@ -793,42 +821,242 @@ def _ensure(app: RunApp | ComposeApp) -> int:
     return _ensure_compose(app)
 
 
+def _project() -> str:
+    global _PROJECT_ID
+    if _PROJECT_ID == "":
+        _PROJECT_ID = f"insidia-bench-{secrets.token_hex(4)}"
+    suffix = _PROJECT_ID.removeprefix("insidia-bench-")
+    if not _PROJECT_ID.startswith("insidia-bench-") or suffix == "":
+        raise RuntimeError("benchmark project name must start with insidia-bench-")
+    return _PROJECT_ID
+
+
+def _project_label() -> str:
+    return f"insidia.benchmark.project={_project()}"
+
+
+def _sandbox_network() -> str:
+    return _project()
+
+
+def _publish_network() -> str:
+    return f"{_project()}-publish"
+
+
+def _container_name(name: str) -> str:
+    return f"{_project()}-{name}"
+
+
+def _override_file() -> Path:
+    return Path(__file__).resolve().parents[1] / "targets" / "crapi-override.yml"
+
+
+def _probe_image() -> str:
+    services = load_compose().get("services")
+    if not isinstance(services, dict):
+        raise SandboxOpen("compose has no services")
+    probe = services.get("egress-probe")
+    if not isinstance(probe, dict):
+        raise SandboxOpen("egress probe is missing")
+    image = probe.get("image")
+    if not isinstance(image, str) or "@sha256:" not in image:
+        raise SandboxOpen("egress probe is not pinned by image digest")
+    return image
+
+
+def _preflight() -> None:
+    global _READY
+    if _READY:
+        return
+    assert_closed(load_compose())
+    image = _probe_image()
+    _create_networks()
+    _require_internal(_sandbox_network())
+    evaluate(
+        [
+            _probe_one("http://1.1.1.1/", _IP_PROBE, image),
+            _probe_one(CANARY_URL, _DNS_PROBE, image),
+        ]
+    )
+    _READY = True
+
+
+def _create_networks() -> None:
+    _network_create(_sandbox_network(), internal=True)
+    _network_create(_publish_network(), internal=False)
+
+
+def _network_create(name: str, *, internal: bool) -> None:
+    if _network_owned(name):
+        return
+    command = ["network", "create"]
+    if internal:
+        command.append("--internal")
+    command.extend(["--label", _BENCH_LABEL, "--label", _project_label(), name])
+    _docker(command)
+
+
+def _require_internal(name: str) -> None:
+    result = subprocess.run(
+        ["docker", "network", "inspect", "-f", "{{.Internal}}", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        raise SandboxOpen("sandbox network is not internal")
+
+
+def _network_owned(name: str) -> bool:
+    if not _PROJECT_ID.startswith("insidia-bench-"):
+        return False
+    result = subprocess.run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "-f",
+            '{{index .Labels "insidia.benchmark.project"}}',
+            name,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == _PROJECT_ID
+
+
+def _probe_one(destination: str, script: str, image: str) -> ProbeResult:
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            _sandbox_network(),
+            "--label",
+            _BENCH_LABEL,
+            "--label",
+            _project_label(),
+            image,
+            "sh",
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return ProbeResult("sandbox", destination, _egress_reached(result))
+
+
+def _egress_reached(result: subprocess.CompletedProcess[str]) -> bool:
+    for line in result.stdout.splitlines():
+        if line.startswith(_EGRESS_MARK):
+            return line.removeprefix(_EGRESS_MARK) == "0"
+    detail = (result.stderr or result.stdout).strip()
+    raise RuntimeError(f"egress probe did not run: {detail}")
+
+
+_PROXY_PROGRAM = """\
+import socket
+import sys
+import threading
+import time
+
+listen = int(sys.argv[1])
+host = sys.argv[2]
+port = int(sys.argv[3])
+
+def pipe(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    try:
+        dst.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+def handle(client):
+    remote = None
+    for _ in range(50):
+        try:
+            remote = socket.create_connection((host, port), 2)
+            break
+        except OSError:
+            time.sleep(0.1)
+    if remote is None:
+        client.close()
+        return
+    threading.Thread(target=pipe, args=(client, remote), daemon=True).start()
+    pipe(remote, client)
+    client.close()
+    remote.close()
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("0.0.0.0", listen))
+server.listen(64)
+while True:
+    client, _addr = server.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+"""
+
+
 def _ensure_run(app: RunApp) -> int:
     cached = _HOST_PORT.get(app.name)
     if cached is not None:
         return cached
-    if not _adopt_run(app):
-        if app.sidecar is not None:
-            _remove(app.sidecar.name)
-        _remove(app.name)
+    _preflight()
+    name = _container_name(app.name)
+    if not _adopt_run(app, name):
         command = [
             "run",
             "-d",
             "--name",
+            name,
+            "--network",
+            _sandbox_network(),
+            "--network-alias",
             app.name,
-            "-p",
-            f"127.0.0.1:{app.host_port}:{app.container_port}",
+            "--label",
+            _BENCH_LABEL,
+            "--label",
+            _project_label(),
         ]
         for key, value in app.env:
             command.extend(["-e", f"{key}={value}"])
         command.append(app.image)
         _docker(command)
-        _STARTED.append(app.name)
-    _wait_http(app.host_port, "/")
+        _STARTED.append(name)
+    proxy = _ensure_proxy(app.host_port, app.name, app.container_port)
     if app.sidecar is not None:
-        _ensure_sidecar(app)
-    _HOST_PORT[app.name] = app.host_port
-    return app.host_port
+        _ensure_sidecar(app, name)
+    port = _loopback_port(proxy, app.host_port)
+    _wait_http(port, "/")
+    _HOST_PORT[app.name] = port
+    return port
 
 
-def _adopt_run(app: RunApp) -> bool:
-    if _inspect(app.name, "{{.State.Running}}") != "true":
+def _adopt_run(app: RunApp, name: str) -> bool:
+    if _inspect(name, "{{.State.Running}}") != "true":
         return False
-    if _inspect(app.name, "{{.Image}}") != _image_id(app.image):
+    if _label_project(name) != _project():
         return False
-    if _binding(app.name, app.container_port) != ("127.0.0.1", str(app.host_port)):
+    if _inspect(name, "{{.Image}}") != _image_id(app.image):
         return False
-    return _env_ok(app.name, app.env)
+    if _networks(name) != {_sandbox_network()}:
+        return False
+    raw = _inspect(name, "{{json .HostConfig.PortBindings}}")
+    if raw not in {None, "", "null", "{}"}:
+        return False
+    return _env_ok(name, app.env)
 
 
 def _env_ok(name: str, env: tuple[tuple[str, str], ...]) -> bool:
@@ -844,21 +1072,73 @@ def _env_ok(name: str, env: tuple[tuple[str, str], ...]) -> bool:
     return all(f"{key}={value}" in present for key, value in env)
 
 
-def _ensure_sidecar(app: RunApp) -> None:
+def _ensure_proxy(listen_port: int, target_host: str, target_port: int) -> str:
+    name = f"{_project()}-proxy-{listen_port}"
+    if _inspect(name, "{{.State.Running}}") != "true":
+        _docker(
+            [
+                "run",
+                "-d",
+                "--name",
+                name,
+                "--network",
+                _publish_network(),
+                "--label",
+                _BENCH_LABEL,
+                "--label",
+                _project_label(),
+                "-p",
+                f"127.0.0.1::{listen_port}",
+                "--entrypoint",
+                "python",
+                _VAMPI_IMAGE,
+                "-c",
+                _PROXY_PROGRAM,
+                str(listen_port),
+                target_host,
+                str(target_port),
+            ]
+        )
+        _STARTED.append(name)
+        _docker(["network", "connect", _sandbox_network(), name])
+    return name
+
+
+def _loopback_port(name: str, container_port: int) -> int:
+    result = subprocess.run(
+        ["docker", "port", name, f"{container_port}/tcp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"{name} has no loopback port: {detail}")
+    for line in result.stdout.splitlines():
+        if line.startswith("127.0.0.1:"):
+            return int(line.rsplit(":", 1)[1])
+    raise SandboxOpen(f"{name} is not published on 127.0.0.1")
+
+
+def _ensure_sidecar(app: RunApp, parent: str) -> None:
     sidecar = app.sidecar
     if sidecar is None:
         return
-    if _sidecar_ok(app, sidecar):
+    name = _container_name(sidecar.name)
+    if _sidecar_ok(parent, name, sidecar):
         return
-    _remove(sidecar.name)
     _docker(
         [
             "run",
             "-d",
             "--name",
-            sidecar.name,
+            name,
             "--network",
-            f"container:{app.name}",
+            f"container:{parent}",
+            "--label",
+            _BENCH_LABEL,
+            "--label",
+            _project_label(),
             "--entrypoint",
             "python",
             app.image,
@@ -866,69 +1146,71 @@ def _ensure_sidecar(app: RunApp) -> None:
             _listen_program(sidecar.port, sidecar.body),
         ]
     )
-    _STARTED.append(sidecar.name)
-    _wait_serves(sidecar.name, sidecar.port, sidecar.body)
+    _STARTED.append(name)
+    _wait_serves(name, sidecar.port, sidecar.body)
 
 
-def _sidecar_ok(app: RunApp, sidecar: Sidecar) -> bool:
-    if _inspect(sidecar.name, "{{.State.Running}}") != "true":
+def _sidecar_ok(parent: str, name: str, sidecar: Sidecar) -> bool:
+    if _inspect(name, "{{.State.Running}}") != "true":
         return False
-    if not _joined(app.name, sidecar.name):
+    if not _joined(parent, name):
         return False
-    return _serves(sidecar.name, sidecar.port, sidecar.body)
+    return _serves(name, sidecar.port, sidecar.body)
 
 
-def _joined(app: str, sidecar: str) -> bool:
+def _joined(parent: str, sidecar: str) -> bool:
     mode = _inspect(sidecar, "{{.HostConfig.NetworkMode}}") or ""
-    if mode == f"container:{app}":
+    if mode == f"container:{parent}":
         return True
-    app_id = _inspect(app, "{{.Id}}") or ""
+    app_id = _inspect(parent, "{{.Id}}") or ""
     bare = app_id.removeprefix("sha256:")
     return mode in {f"container:{app_id}", f"container:{bare}"}
-
-
-def _remove(name: str) -> None:
-    if _inspect(name, "{{.State.Status}}") is not None:
-        _docker(["rm", "-f", name])
 
 
 def _ensure_compose(app: ComposeApp) -> int:
     cached = _HOST_PORT.get(app.name)
     if cached is not None:
         return cached
+    _preflight()
     compose_file = _compose_file()
-    if not (_inspect("crapi-web", "{{.State.Running}}") == "true" and _http_up(app.web_port)):
-        _down_foreign(compose_file)
-        _start_waves(app, compose_file)
-    _wait_http(app.web_port, "/")
-    network = _primary_network("crapi-web")
-    _ensure_marker(app, network)
-    _HOST_PORT[app.name] = app.web_port
-    return app.web_port
+    override = _override_file()
+    project = _project()
+    _start_waves(app, compose_file, override, project)
+    proxy = _ensure_proxy(app.web_port, "crapi-web", 80)
+    port = _loopback_port(proxy, app.web_port)
+    _wait_http(port, "/")
+    _ensure_marker(app)
+    _HOST_PORT[app.name] = port
+    return port
 
 
-def _start_waves(app: ComposeApp, compose_file: Path) -> None:
+def _start_waves(app: ComposeApp, compose_file: Path, override: Path, project: str) -> None:
     global _COMPOSE
-    _COMPOSE = (compose_file, _PROJECT)
+    _COMPOSE = (compose_file, override, project)
     for wave in app.waves:
         if "crapi-web" in wave:
-            _wait_running("crapi-chatbot")
-        _compose(compose_file, _PROJECT, ["up", "-d", *wave])
+            _wait_running(_container_name("crapi-chatbot"))
+        _compose([compose_file, override], project, ["up", "-d", *wave])
 
 
-def _ensure_marker(app: ComposeApp, network: str) -> None:
-    if _marker_ok(app, network):
+def _ensure_marker(app: ComposeApp) -> None:
+    name = _container_name(app.marker_name)
+    if _marker_ok(app, name):
         return
-    if _inspect(app.marker_name, "{{.State.Status}}") is not None:
-        _docker(["rm", "-f", app.marker_name])
     _docker(
         [
             "run",
             "-d",
             "--name",
-            app.marker_name,
+            name,
             "--network",
-            network,
+            _sandbox_network(),
+            "--network-alias",
+            app.marker_name,
+            "--label",
+            _BENCH_LABEL,
+            "--label",
+            _project_label(),
             "--entrypoint",
             "python",
             app.marker_image,
@@ -936,16 +1218,16 @@ def _ensure_marker(app: ComposeApp, network: str) -> None:
             _listen_program(app.marker_port, app.marker_body),
         ]
     )
-    _STARTED.append(app.marker_name)
-    _wait_serves(app.marker_name, app.marker_port, app.marker_body)
+    _STARTED.append(name)
+    _wait_serves(name, app.marker_port, app.marker_body)
 
 
-def _marker_ok(app: ComposeApp, network: str) -> bool:
-    if _inspect(app.marker_name, "{{.State.Running}}") != "true":
+def _marker_ok(app: ComposeApp, name: str) -> bool:
+    if _inspect(name, "{{.State.Running}}") != "true":
         return False
-    if network not in _networks(app.marker_name):
+    if _networks(name) != {_sandbox_network()}:
         return False
-    return _serves(app.marker_name, app.marker_port, app.marker_body)
+    return _serves(name, app.marker_port, app.marker_body)
 
 
 def _listen_program(port: int, body: str) -> str:
@@ -991,19 +1273,21 @@ def _wait_serves(name: str, port: int, body: str) -> None:
     raise RuntimeError(f"{name} did not serve {body}")
 
 
-def _down_foreign(compose_file: Path) -> None:
-    project = _inspect("crapi-web", '{{index .Config.Labels "com.docker.compose.project"}}')
-    if project:
-        _compose(compose_file, project, ["down"])
-
-
-def _compose(compose_file: Path, project: str, args: list[str], timeout: float = 600) -> None:
+def _compose(files: list[Path], project: str, args: list[str], timeout: float = 600) -> None:
+    if not project.startswith("insidia-bench-") or project == "insidia-bench-":
+        raise RuntimeError(f"refusing compose on {project}")
     env = os.environ.copy()
     env["TLS_ENABLED"] = "false"
     env["COMPOSE_PROJECT_NAME"] = project
+    env["INSIDIA_SANDBOX_NETWORK"] = _sandbox_network()
+    env["INSIDIA_BENCH_PROJECT"] = project
+    command = ["docker", "compose"]
+    for file in files:
+        command.extend(["-f", str(file)])
+    command.extend(["-p", project, *args])
     result = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "-p", project, *args],
-        cwd=compose_file.parent,
+        command,
+        cwd=files[0].parent,
         env=env,
         capture_output=True,
         text=True,
@@ -1057,18 +1341,6 @@ def _wait_running(name: str) -> None:
     raise RuntimeError(f"{name} did not start")
 
 
-def _binding(name: str, container_port: int) -> tuple[str, str] | None:
-    raw = _inspect(name, "{{json .NetworkSettings.Ports}}")
-    if raw is None:
-        return None
-    ports = json.loads(raw)
-    bindings = ports.get(f"{container_port}/tcp") if isinstance(ports, dict) else None
-    if not bindings:
-        return None
-    first = bindings[0]
-    return str(first.get("HostIp", "")), str(first.get("HostPort", ""))
-
-
 def _networks(name: str) -> set[str]:
     raw = _inspect(name, "{{json .NetworkSettings.Networks}}")
     if raw is None:
@@ -1077,13 +1349,6 @@ def _networks(name: str) -> set[str]:
     if not isinstance(payload, dict):
         return set()
     return set(payload)
-
-
-def _primary_network(name: str) -> str:
-    names = _networks(name)
-    if not names:
-        raise RuntimeError(f"{name} has no network")
-    return sorted(names)[0]
 
 
 def _image_id(ref: str) -> str:
@@ -1124,23 +1389,70 @@ def _docker(args: list[str]) -> None:
         raise RuntimeError(f"docker {' '.join(args[:4])} failed: {detail}")
 
 
+def _label_project(name: str) -> str | None:
+    return _inspect(name, '{{index .Config.Labels "insidia.benchmark.project"}}')
+
+
 def _stop_started() -> None:
+    project = _PROJECT_ID
+    if not project.startswith("insidia-bench-") or project == "insidia-bench-":
+        return
     for name in reversed(_STARTED):
+        if _label_project(name) == project:
+            subprocess.run(
+                ["docker", "rm", "-f", name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    try:
+        _down_owned()
+    finally:
+        _remove_networks()
+
+
+def _down_owned() -> None:
+    if _COMPOSE is None:
+        return
+    compose_file, override, project = _COMPOSE
+    if project != _PROJECT_ID or not project.startswith("insidia-bench-"):
+        return
+    if not _network_owned(_sandbox_network()):
+        return
+    env = os.environ.copy()
+    env["TLS_ENABLED"] = "false"
+    env["COMPOSE_PROJECT_NAME"] = project
+    env["INSIDIA_SANDBOX_NETWORK"] = project
+    env["INSIDIA_BENCH_PROJECT"] = project
+    try:
         subprocess.run(
-            ["docker", "rm", "-f", name],
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_file),
+                "-f",
+                str(override),
+                "-p",
+                project,
+                "down",
+            ],
+            cwd=compose_file.parent,
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-    if _COMPOSE is None:
+    except OSError:
         return
-    compose_file, project = _COMPOSE
-    env = os.environ.copy()
-    env["COMPOSE_PROJECT_NAME"] = project
+
+
+def _remove_networks() -> None:
+    names = [name for name in (_sandbox_network(), _publish_network()) if _network_owned(name)]
+    if not names:
+        return
     subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "-p", project, "down"],
-        cwd=compose_file.parent,
-        env=env,
+        ["docker", "network", "rm", *names],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
