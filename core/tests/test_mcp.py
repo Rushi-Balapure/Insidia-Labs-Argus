@@ -37,6 +37,7 @@ def test_mcp_http_sends_a_tool_call_and_reports_a_leak(tmp_path: Path) -> None:
         assert main(["scan", "--config", str(tmp_path / "insidia.yaml")]) == 1
     finally:
         server.shutdown()
+        server.server_close()
     assert {
         "jsonrpc": "2.0",
         "id": 1,

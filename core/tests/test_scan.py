@@ -84,6 +84,7 @@ def test_redirect_to_an_unlisted_host_is_rejected(tmp_path: Path) -> None:
         raise AssertionError("expected CliError")
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_redirect_to_another_in_scope_host_is_refused(tmp_path: Path) -> None:
@@ -133,7 +134,9 @@ def test_redirect_to_another_in_scope_host_is_refused(tmp_path: Path) -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -182,7 +185,9 @@ def test_redirect_to_another_port_is_refused(tmp_path: Path) -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -215,6 +220,7 @@ def test_same_origin_redirect_is_followed(tmp_path: Path) -> None:
         )
     finally:
         server.shutdown()
+        server.server_close()
     assert body == "land"
 
 
@@ -242,6 +248,7 @@ def test_redirect_with_a_raw_space_returns_the_302(location: str) -> None:
         )
     finally:
         server.shutdown()
+        server.server_close()
     assert status == 302
     assert headers.get("location") == location
     assert seen == ["/go"]
@@ -291,7 +298,9 @@ def test_spaced_location_that_changes_port_is_not_contacted() -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -347,7 +356,9 @@ targets:
         code = main(["scan", "--config", str(config), "--quiet"])
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert code == 2
     assert hit["followed"] is False
     benchmark = json.loads(_latest(tmp_path, "benchmark.json").read_text())
@@ -474,6 +485,7 @@ targets:
     finally:
         for server in (kept, second, other):
             server.shutdown()
+            server.server_close()
     benchmark = json.loads(_latest(tmp_path, "benchmark.json").read_text())
     findings = json.loads(_latest(tmp_path, "findings.json").read_text())
     return code, benchmark, findings, followed["n"], hop

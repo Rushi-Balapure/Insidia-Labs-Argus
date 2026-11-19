@@ -147,6 +147,7 @@ def test_unauthorized_target_cannot_pass(tmp_path: Path) -> None:
         code = main(["scan", "--config", str(tmp_path / "insidia.yaml"), "--quiet"])
     finally:
         server.shutdown()
+        server.server_close()
     assert code != 0
 
 
