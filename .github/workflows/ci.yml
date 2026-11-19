@@ -46,12 +46,9 @@ jobs:
           docker pull bkimminich/juice-shop@sha256:73c53fbf442e8337b3ea3d98c7e8550308854701ebdfce4cc39768f36b75430e
           docker pull erev0s/vampi@sha256:0a5a224b6e14ae7da6a6ea265178ff71286ff903aec74adee98f660bb0e4ca12
           docker pull dolevf/dvga@sha256:040aa33c199d99f3380c9ff9a1ee5d725e9abca7b189c63a35a2a73bda79c957
+          docker pull busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+          docker pull zenika/alpine-chrome@sha256:eb3378c1ed0079f94db054a5fe1aaa790a254ec0d6bbc67eda052420d86a179d
           docker compose -f ../local-targets/crAPI/deploy/docker/docker-compose.yml pull
-      - name: Install Chrome for the Juice Shop page check
-        run: |
-          curl -fsSL -o /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update
-          sudo apt-get install -y /tmp/google-chrome-stable_current_amd64.deb
       - run: uv run --project benchmark ruff check benchmark
       - run: uv run python -m pytest
         working-directory: benchmark
