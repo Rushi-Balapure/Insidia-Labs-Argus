@@ -33,6 +33,19 @@ uv run mypy insidia
 uv run pytest
 ```
 
+## Engine lockfiles
+
+Python engines install from the hash-pinned requirements in `core/insidia/locks/`. promptfoo installs with `npm ci` from `core/insidia/locks/promptfoo/package-lock.json`. Regenerate the locks when an engine version changes. The command reaches PyPI and the npm registry:
+
+```bash
+cd core
+uv run python scripts/lock_engines.py
+```
+
+It runs `uv pip compile --generate-hashes --universal --python-version 3.12`. Engine virtualenvs use Python 3.12, and `--universal` records a hash for every platform wheel of those pins. Garak is compiled with `--torch-backend cpu`. SkillSpector is pinned to commit `c7958a3268d9498644b22edb75d0f051bbc8cbfc` (tag v2.12.0), not the tag. Binary downloads are pinned by SHA-256 in `core/insidia/engines.py`; a missing pin is refused, and `--allow-unverified` does not skip the check. `insidia upgrade` installs the release wheel after its SHA-256 matches `SHA256SUMS` (and the GitHub asset digest when that is present). It does not install from a git tag.
+
+Hatchling ships `insidia/locks` in the wheel because that directory is inside the package. Do not also `force-include` it; the build then adds each file twice and fails.
+
 The scanner benchmark, from the repository root:
 
 ```bash
