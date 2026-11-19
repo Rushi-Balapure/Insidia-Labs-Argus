@@ -112,10 +112,37 @@ def _prove(cell: Cell) -> list[Finding]:
     return _matched(cell, findings)
 
 
+_GROUNDS: dict[str, set[str]] = {}
+
+
+def _ground_truth(target: str) -> set[str]:
+    cached = _GROUNDS.get(target)
+    if cached is None:
+        from benchmark.matrix.registry import valid_cells
+
+        cached = {item.attack for item in valid_cells() if item.target == target}
+        _GROUNDS[target] = cached
+    return cached
+
+
 def _matched(cell: Cell, findings: list[dict[str, object]]) -> list[Finding]:
-    if any(item.get("attack") == cell.attack for item in findings):
-        return [Finding(cell.plant_ids[0])]
-    return []
+    planted = _ground_truth(cell.target)
+    scored: list[Finding] = []
+    for item in findings:
+        attack = item.get("attack")
+        if isinstance(attack, str) and attack in planted and attack != cell.attack:
+            continue
+        severity = item.get("severity")
+        level = severity if isinstance(severity, str) and severity else "high"
+        if attack == cell.attack:
+            scored.append(Finding(cell.plant_ids[0], level))
+            continue
+        token = item.get("evidence_hash") or item.get("probe") or item.get("check_id")
+        if not isinstance(token, str) or not token:
+            token = "finding"
+        name = attack if isinstance(attack, str) and attack else "unknown"
+        scored.append(Finding(f"unmatched.{name}.{token}", level))
+    return scored
 
 
 def _call_for(cell: Cell) -> SandboxCall:
