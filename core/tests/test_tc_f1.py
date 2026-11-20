@@ -1359,7 +1359,6 @@ def _replay_failed_install_job(
     return decisions, collect_result
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_N11_REASON)
 def test_tc_f1_n11_failed_install_does_not_upload_planted_scan_json(tmp_path: Path) -> None:
     """TC-F1-N11. A failed Install must not upload a committed planted scan json.
 
