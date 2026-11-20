@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -21,14 +22,24 @@ from insidia.catalog import SPECS, EngineSpec
 from insidia.errors import CliError
 from insidia.process import child_env
 
-_CPU_TORCH = "https://download.pytorch.org/whl/cpu"
 _GITHUB_PREFIX = "https://github.com"
+_PYTHON_PROGRAM = {
+    "garak": "garak",
+    "deepteam": "python",
+    "pyrit": "python",
+    "bandit": "bandit",
+    "mcp-scanner": "mcp-scanner",
+    "skillspector": "skillspector",
+    "nuguard": "python",
+}
+# The lock pins CPU wheels. macOS resolves the default torch build; other hosts use +cpu.
+_PIP_ARGS: dict[str, tuple[str, ...]] = {"garak": ("--torch-backend", "cpu")}
+_HASH = re.compile(r"--hash=sha256:[0-9a-fA-F]{64}\b")
 
 # SHA-256 of the file `_github()` names, keyed by that canonical GitHub URL.
 # INSIDIA_ENGINE_MIRROR may replace the https://github.com prefix at fetch time.
-# The pin is never keyed by the mirror URL. A mismatch always fails, before
-# extract. A platform with no entry is refused unless
-# `engines install --allow-unverified` is passed.
+# The pin is never keyed by the mirror URL. A missing pin or a mismatch fails
+# before extract. `--allow-unverified` does not skip this check.
 PINNED_SHA256: dict[str, str] = {
     (
         "https://github.com/aquasecurity/trivy/releases/download/"
@@ -107,6 +118,104 @@ PINNED_SHA256: dict[str, str] = {
     (
         "https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz"
     ): "efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a",
+    (
+        "https://github.com/aquasecurity/trivy/releases/download/"
+        "v0.75.0/trivy_0.75.0_macOS-64bit.tar.gz"
+    ): "291edaa9778acbe4693d067b5ad60ee11570e5ac68296e85595417528ca641e4",
+    (
+        "https://github.com/aquasecurity/trivy/releases/download/"
+        "v0.75.0/trivy_0.75.0_macOS-ARM64.tar.gz"
+    ): "4a77108cccf8e55c8d6823e1e759939a622277e66cd0daa3c1fc621ed69e4568",
+    (
+        "https://github.com/aquasecurity/trivy/releases/download/"
+        "v0.75.0/trivy_0.75.0_windows-64bit.zip"
+    ): "4e43bd71a30f51aee39525f60f2b47043af77eb8df8fe082aae4372b69c6660f",
+    (
+        "https://github.com/gitleaks/gitleaks/releases/download/"
+        "v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"
+    ): "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    (
+        "https://github.com/gitleaks/gitleaks/releases/download/"
+        "v8.30.1/gitleaks_8.30.1_darwin_x64.tar.gz"
+    ): "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709",
+    (
+        "https://github.com/gitleaks/gitleaks/releases/download/"
+        "v8.30.1/gitleaks_8.30.1_windows_arm64.zip"
+    ): "b95f5e4f5c425cedca7ee203d9afd29597e692c4924a12ed42f970537c72cc0f",
+    (
+        "https://github.com/gitleaks/gitleaks/releases/download/"
+        "v8.30.1/gitleaks_8.30.1_windows_x64.zip"
+    ): "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e",
+    (
+        "https://github.com/hahwul/dalfox/releases/download/"
+        "v3.2.3/dalfox-v3.2.3-macos-aarch64.tar.gz"
+    ): "b8cd129ec42663456f515cb5f655a38bb55e3ed5fcdfa8249c8306116898ac6b",
+    (
+        "https://github.com/hahwul/dalfox/releases/download/"
+        "v3.2.3/dalfox-v3.2.3-macos-x86_64.tar.gz"
+    ): "ec5edf21819ec2987c56afefb99533278992b03440b2f3f145f5c18c98f90b9b",
+    (
+        "https://github.com/hahwul/dalfox/releases/download/"
+        "v3.2.3/dalfox-v3.2.3-windows-x86_64.zip"
+    ): "0ad74b8937104d4603dea54c7e8d9d17e6802383a5f8b8133c7f55f19759e4a8",
+    (
+        "https://github.com/projectdiscovery/katana/releases/download/"
+        "v1.8.0/katana_1.8.0_macOS_amd64.zip"
+    ): "806256316dd45e0fe0e3985fd7283ddffc376c95cbaa3dcfd14cde6e1de61aaf",
+    (
+        "https://github.com/projectdiscovery/katana/releases/download/"
+        "v1.8.0/katana_1.8.0_macOS_arm64.zip"
+    ): "52e9802e9f83012a089fe57fb1ac476b936f181ac033c71bfa55f913c07cede6",
+    (
+        "https://github.com/projectdiscovery/katana/releases/download/"
+        "v1.8.0/katana_1.8.0_windows_amd64.zip"
+    ): "8013253e3092e08524527a5c3f7ebd70747acc4bb51414858f8e6dffeb17f907",
+    (
+        "https://github.com/projectdiscovery/katana/releases/download/"
+        "v1.8.0/katana_1.8.0_windows_arm64.zip"
+    ): "4b7c2e5759c8ea1a72081d75930e1ef24853a933c1d35e114ef6787bfc8ae058",
+    (
+        "https://github.com/projectdiscovery/httpx/releases/download/"
+        "v1.12.0/httpx_1.12.0_macOS_amd64.zip"
+    ): "16760b5e2122b66f57b9fbdb59f564b1181507c093d6a36066f40e5de38e8fa9",
+    (
+        "https://github.com/projectdiscovery/httpx/releases/download/"
+        "v1.12.0/httpx_1.12.0_macOS_arm64.zip"
+    ): "21d60328b383dba8a9fe249ac76b12edda4ec2e52a9cb21876c0a79123675569",
+    (
+        "https://github.com/projectdiscovery/httpx/releases/download/"
+        "v1.12.0/httpx_1.12.0_windows_amd64.zip"
+    ): "14d8ccaa2d95ce9365162682f1a2ba3f14d2000bb4bfb0924af65ec5163ae021",
+    (
+        "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_darwin_amd64"
+    ): "60c5296637e977b28eeda5c7f13573e447659a632922737f94d11fa7e30ad6ca",
+    (
+        "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_darwin_arm64"
+    ): "98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4",
+    (
+        "https://github.com/google/osv-scanner/releases/download/"
+        "v2.6.0/osv-scanner_windows_amd64.exe"
+    ): "e0ed7644118b717b028c249ee9d3515024e55e8510747ca08906eb96765354d6",
+    (
+        "https://github.com/google/osv-scanner/releases/download/"
+        "v2.6.0/osv-scanner_windows_arm64.exe"
+    ): "ca1379da0e408279ef2c85cde0846a903495738a91c7b065a208048437c1686c",
+    (
+        "https://github.com/securego/gosec/releases/download/"
+        "v2.29.0/gosec_2.29.0_darwin_amd64.tar.gz"
+    ): "a48152c3c009988f1750b6508316339c8b55076d24b1a958789e30ea2a21794c",
+    (
+        "https://github.com/securego/gosec/releases/download/"
+        "v2.29.0/gosec_2.29.0_darwin_arm64.tar.gz"
+    ): "7ab6a92c1983b7cb9df12b3ac20fb270afa43cfa12a143c354edae3109c763e5",
+    (
+        "https://github.com/securego/gosec/releases/download/"
+        "v2.29.0/gosec_2.29.0_windows_amd64.tar.gz"
+    ): "67cd5ca3a80280b27102a8d6482e7124e8a47bda240412a0fcd1bb7f1be96faf",
+    (
+        "https://github.com/securego/gosec/releases/download/"
+        "v2.29.0/gosec_2.29.0_windows_arm64.tar.gz"
+    ): "6165a36fe42ec5cbab06c1b42c1e26abb5d0b6dc789fb8661e6fe911cd30d460",
 }
 
 
@@ -126,14 +235,6 @@ def _npm_script(name: str) -> str:
     if os.name == "nt":
         return f"node_modules/.bin/{name}.cmd"
     return f"node_modules/.bin/{name}"
-
-
-def _release_os() -> str:
-    if sys.platform == "darwin":
-        return "macOS"
-    if sys.platform == "win32":
-        return "windows"
-    return "linux"
 
 
 def toolchain_root() -> Path:
@@ -238,6 +339,8 @@ def install(
         if progress is not None:
             progress(f"Installing {name} {spec.version}.")
         line = _install_one(name, allow_unverified=allow_unverified)
+        if allow_unverified:
+            line += "; warning: --allow-unverified does not skip hash verification"
         needed = missing_runtime(name)
         if needed:
             line = f"{line}; warning: needs {needed} before it can run"
@@ -279,7 +382,7 @@ def _install_one(name: str, allow_unverified: bool = False) -> str:
 
 
 def _publish(stage: Path, final: Path, receipt: dict[str, str]) -> None:
-    (stage / "receipt.json").write_text(json.dumps(receipt) + "\n")
+    (stage / "receipt.json").write_text(json.dumps(receipt) + "\n", encoding="utf-8")
     if final.exists():
         backup = final.with_name(f".{final.name}.previous")
         if backup.exists():
@@ -311,51 +414,23 @@ def _rewrite_shebangs(root: Path) -> None:
         if script.is_symlink() or not script.is_file():
             continue
         try:
-            text = script.read_text()
+            text = script.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
         first, sep, rest = text.partition("\n")
         if not first.startswith("#!") or "python" not in first or first == line:
             continue
-        script.write_text(line + sep + rest)
+        script.write_text(line + sep + rest, encoding="utf-8")
 
 
 def _stage(spec: EngineSpec, stage: Path, allow_unverified: bool = False) -> str:
-    if spec.name == "garak":
-        # CPU torch first. The second install pins that build so PyPI cannot
-        # replace it with a CUDA wheel, and looks at every index so tqdm can
-        # come from PyPI. The CPU index only publishes an older tqdm.
-        _venv(stage, ["torch"], index=_CPU_TORCH)
-        pinned = _installed_version(stage, "torch")
-        _venv(
-            stage,
-            [spec.package, f"torch=={pinned}"],
-            extra_index=_CPU_TORCH,
-            strategy="unsafe-best-match",
-        )
-        return _require(stage, _venv_script("garak"))
-    if spec.name == "deepteam":
-        # 1.0.9 imports sentry_sdk without declaring it. The scan turns its telemetry off.
-        _venv(stage, [spec.package, "sentry-sdk==2.71.0"])
-        return _require(stage, _venv_script("python"))
-    if spec.name in {"pyrit", "bandit"}:
-        _venv(stage, [spec.package])
-        if spec.name == "bandit":
-            return _require(stage, _venv_script("bandit"))
-        return _require(stage, _venv_script("python"))
-    if spec.name == "mcp-scanner":
-        _venv(stage, [spec.package])
-        return _require(stage, _venv_script("mcp-scanner"))
-    if spec.name == "skillspector":
-        _venv(stage, [spec.package])
-        return _require(stage, _venv_script("skillspector"))
-    if spec.name == "nuguard":
-        # 0.9.15 imports cryptography without declaring it.
-        _venv(stage, [spec.package, "cryptography==50.0.2"])
-        _require(stage, _venv_script("nuguard"))
-        return _require(stage, _venv_script("python"))
+    if spec.name in _PYTHON_PROGRAM:
+        _install_locked_python(spec, stage)
+        if spec.name == "nuguard":
+            _require(stage, _venv_script("nuguard"))
+        return _require(stage, _venv_script(_PYTHON_PROGRAM[spec.name]))
     if spec.name == "promptfoo":
-        _npm(stage, spec.package)
+        _install_locked_npm(stage)
         return _require(stage, _npm_script("promptfoo"))
     if spec.name == "zap":
         return _fetch_zap(spec, stage, allow_unverified=allow_unverified)
@@ -370,60 +445,144 @@ def _require(stage: Path, relative: str) -> str:
     return relative
 
 
-def _installed_version(stage: Path, package: str) -> str:
-    python = _venv_python(stage)
+def _locks_root() -> Path:
+    return Path(__file__).resolve().parent / "locks"
+
+
+def _lock_file(name: str) -> Path:
+    path = _locks_root() / f"{name}.txt"
+    if not path.is_file():
+        raise CliError(f"{name} has no hash-pinned lock file")
+    return path
+
+
+def _logical_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            if current:
+                lines.append(current)
+                current = ""
+            continue
+        if stripped.endswith("\\"):
+            current = f"{current}{stripped[:-1].strip()} "
+            continue
+        lines.append(f"{current}{stripped}")
+        current = ""
+    if current:
+        lines.append(current.strip())
+    return lines
+
+
+def _requirement_label(line: str) -> str:
+    head = line.split("--hash", 1)[0].split(";", 1)[0].strip()
+    if "@" in head:
+        head = head.split("@", 1)[0].strip()
+    else:
+        head = head.split("==", 1)[0].split("[", 1)[0].strip()
+    return head or line
+
+
+def _require_lock_hashes(lock: Path) -> None:
+    """Refuse a requirements file that could install without a sha256 pin."""
     try:
-        result = subprocess.run(
-            [
-                str(python),
-                "-c",
-                "import importlib.metadata as meta, sys; "
-                "sys.stdout.write(meta.version(sys.argv[1]))",
-                package,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=child_env({}),
-            shell=False,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise CliError(f"{package} was not installed") from exc
-    return result.stdout.strip()
+        text = lock.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CliError(f"could not read {lock.name}") from exc
+    requirements: list[str] = []
+    for line in _logical_lines(text):
+        if line.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+            raise CliError(f"{lock.name} cannot include another requirements file")
+        if line.startswith("-"):
+            continue
+        requirements.append(line)
+    if not requirements:
+        raise CliError(f"{lock.name} pins no packages")
+    for line in requirements:
+        label = _requirement_label(line)
+        if "git+" in line or line.startswith("git@"):
+            raise CliError(f"{lock.name} pins {label} with a git ref; a git tag can be moved")
+        if _HASH.search(line) is None:
+            raise CliError(f"{lock.name} is missing a SHA-256 pin for {label}")
 
 
-def _venv(
-    stage: Path,
-    packages: list[str],
-    index: str | None = None,
-    extra_index: str | None = None,
-    strategy: str | None = None,
-) -> None:
+def _require_npm_integrity(lock: Path) -> None:
+    """Refuse an npm lock whose installed packages have no integrity hash."""
+    try:
+        document = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CliError(f"{lock.name} is not a package-lock.json") from exc
+    packages = document.get("packages") if isinstance(document, dict) else None
+    if not isinstance(packages, dict):
+        raise CliError(f"{lock.name} does not pin promptfoo")
+    version = document.get("lockfileVersion")
+    if not isinstance(version, int) or version < 2:
+        raise CliError(f"{lock.name} is not a lockfile with integrity hashes")
+    saw_promptfoo = False
+    for key, meta in packages.items():
+        if (
+            not isinstance(key, str)
+            or not key.startswith("node_modules/")
+            or not isinstance(meta, dict)
+        ):
+            continue
+        if meta.get("link") is True or meta.get("inBundle") is True:
+            continue
+        if key == "node_modules/promptfoo" or key.endswith("/node_modules/promptfoo"):
+            saw_promptfoo = True
+            if meta.get("version") != "0.124.0":
+                raise CliError(f"promptfoo lock pins {meta.get('version')}, want 0.124.0")
+        integrity = meta.get("integrity")
+        resolved = meta.get("resolved")
+        if not isinstance(resolved, str) or not resolved:
+            if meta.get("optional") is True or meta.get("peer") is True:
+                continue
+        if not isinstance(integrity, str) or not integrity.startswith(("sha512-", "sha1-")):
+            raise CliError(f"{lock.name} is missing an integrity hash for {key}")
+    if not saw_promptfoo:
+        raise CliError(f"{lock.name} does not pin promptfoo")
+
+
+def _install_locked_python(spec: EngineSpec, stage: Path) -> None:
+    lock = _lock_file(spec.name)
+    _require_lock_hashes(lock)
     uv = shutil.which("uv")
     if uv is None:
         raise CliError("uv is not installed")
-    venv = stage / "venv"
     python = _venv_python(stage)
     env = child_env({})
     if not python.is_file():
-        _checked([uv, "venv", "--python", "3.12", str(venv)], env)
-    command = [uv, "pip", "install", "--python", str(python)]
-    if index:
-        command.extend(["--index-url", index])
-    if extra_index:
-        command.extend(["--extra-index-url", extra_index])
-    if strategy:
-        command.extend(["--index-strategy", strategy])
-    command.extend(packages)
+        _checked([uv, "venv", "--python", "3.12", str(stage / "venv")], env)
+    command = [
+        uv,
+        "pip",
+        "install",
+        "--python",
+        str(python),
+        *_PIP_ARGS.get(spec.name, ()),
+        "--require-hashes",
+        "-r",
+        str(lock),
+    ]
     _checked(command, env)
 
 
-def _npm(stage: Path, package: str) -> None:
+def _install_locked_npm(stage: Path) -> None:
     npm = shutil.which("npm")
     if npm is None:
         raise CliError("npm is not installed")
+    source = _locks_root() / "promptfoo"
+    lock = source / "package-lock.json"
+    manifest = source / "package.json"
+    _require_npm_integrity(lock)
+    if not manifest.is_file():
+        raise CliError("promptfoo has no package.json")
+    shutil.copyfile(manifest, stage / "package.json")
+    shutil.copyfile(lock, stage / "package-lock.json")
     _checked(
-        [npm, "install", "--prefix", str(stage), "--no-fund", "--no-audit", package],
+        [npm, "ci", "--prefix", str(stage), "--no-fund", "--no-audit", "--ignore-scripts"],
         child_env({}),
     )
 
@@ -439,6 +598,7 @@ def _checked(command: list[str], env: dict[str, str]) -> None:
             shell=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             errors="replace",
         )
     except subprocess.CalledProcessError as exc:
@@ -504,15 +664,13 @@ def _verify_download(spec: EngineSpec, url: str, archive: Path, allow_unverified
     """Check the downloaded bytes before they are extracted or made executable."""
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     pinned = PINNED_SHA256.get(url)
+    skipped = "; --allow-unverified does not skip hash verification" if allow_unverified else ""
     if pinned is None:
-        if allow_unverified:
-            return
         raise CliError(
-            f"no SHA-256 pin for {spec.name} {spec.version} on this platform; "
-            "pass --allow-unverified to install it anyway"
+            f"no SHA-256 pin for {spec.name} {spec.version} on this platform{skipped}"
         )
     if digest != pinned.lower():
-        raise CliError(f"{spec.name} {spec.version} failed SHA-256 verification")
+        raise CliError(f"{spec.name} {spec.version} failed SHA-256 verification{skipped}")
 
 
 def _mirrored_download_url(url: str) -> str:
@@ -552,59 +710,88 @@ def _download(url: str, destination: Path) -> None:
         raise CliError(f"download failed for {fetch_url}") from exc
 
 
-def _github(spec: EngineSpec) -> str:
+_RELEASE_ROOT: dict[str, str] = {
+    "nuclei": "https://github.com/projectdiscovery/nuclei/releases/download/v{v}/",
+    "dalfox": "https://github.com/hahwul/dalfox/releases/download/v{v}/",
+    "katana": "https://github.com/projectdiscovery/katana/releases/download/v{v}/",
+    "httpx": "https://github.com/projectdiscovery/httpx/releases/download/v{v}/",
+    "trivy": "https://github.com/aquasecurity/trivy/releases/download/v{v}/",
+    "osv-scanner": "https://github.com/google/osv-scanner/releases/download/v{v}/",
+    "gitleaks": "https://github.com/gitleaks/gitleaks/releases/download/v{v}/",
+    "gosec": "https://github.com/securego/gosec/releases/download/v{v}/",
+}
+# (engine, sys.platform, cpu) -> asset filename. Absent means that host has no build.
+_ASSETS: dict[tuple[str, str, str], str] = {
+    ("nuclei", "linux", "amd64"): "nuclei_{v}_linux_amd64.zip",
+    ("nuclei", "linux", "arm64"): "nuclei_{v}_linux_arm64.zip",
+    ("nuclei", "darwin", "amd64"): "nuclei_{v}_macOS_amd64.zip",
+    ("nuclei", "darwin", "arm64"): "nuclei_{v}_macOS_arm64.zip",
+    ("nuclei", "win32", "amd64"): "nuclei_{v}_windows_amd64.zip",
+    ("dalfox", "linux", "amd64"): "dalfox-v{v}-linux-x86_64.tar.gz",
+    ("dalfox", "linux", "arm64"): "dalfox-v{v}-linux-aarch64.tar.gz",
+    ("dalfox", "darwin", "amd64"): "dalfox-v{v}-macos-x86_64.tar.gz",
+    ("dalfox", "darwin", "arm64"): "dalfox-v{v}-macos-aarch64.tar.gz",
+    ("dalfox", "win32", "amd64"): "dalfox-v{v}-windows-x86_64.zip",
+    ("katana", "linux", "amd64"): "katana_{v}_linux_amd64.zip",
+    ("katana", "linux", "arm64"): "katana_{v}_linux_arm64.zip",
+    ("katana", "darwin", "amd64"): "katana_{v}_macOS_amd64.zip",
+    ("katana", "darwin", "arm64"): "katana_{v}_macOS_arm64.zip",
+    ("katana", "win32", "amd64"): "katana_{v}_windows_amd64.zip",
+    ("katana", "win32", "arm64"): "katana_{v}_windows_arm64.zip",
+    ("httpx", "linux", "amd64"): "httpx_{v}_linux_amd64.zip",
+    ("httpx", "linux", "arm64"): "httpx_{v}_linux_arm64.zip",
+    ("httpx", "darwin", "amd64"): "httpx_{v}_macOS_amd64.zip",
+    ("httpx", "darwin", "arm64"): "httpx_{v}_macOS_arm64.zip",
+    ("httpx", "win32", "amd64"): "httpx_{v}_windows_amd64.zip",
+    ("trivy", "linux", "amd64"): "trivy_{v}_Linux-64bit.tar.gz",
+    ("trivy", "linux", "arm64"): "trivy_{v}_Linux-ARM64.tar.gz",
+    ("trivy", "darwin", "amd64"): "trivy_{v}_macOS-64bit.tar.gz",
+    ("trivy", "darwin", "arm64"): "trivy_{v}_macOS-ARM64.tar.gz",
+    ("trivy", "win32", "amd64"): "trivy_{v}_windows-64bit.zip",
+    ("osv-scanner", "linux", "amd64"): "osv-scanner_linux_amd64",
+    ("osv-scanner", "linux", "arm64"): "osv-scanner_linux_arm64",
+    ("osv-scanner", "darwin", "amd64"): "osv-scanner_darwin_amd64",
+    ("osv-scanner", "darwin", "arm64"): "osv-scanner_darwin_arm64",
+    ("osv-scanner", "win32", "amd64"): "osv-scanner_windows_amd64.exe",
+    ("osv-scanner", "win32", "arm64"): "osv-scanner_windows_arm64.exe",
+    ("gitleaks", "linux", "amd64"): "gitleaks_{v}_linux_x64.tar.gz",
+    ("gitleaks", "linux", "arm64"): "gitleaks_{v}_linux_arm64.tar.gz",
+    ("gitleaks", "darwin", "amd64"): "gitleaks_{v}_darwin_x64.tar.gz",
+    ("gitleaks", "darwin", "arm64"): "gitleaks_{v}_darwin_arm64.tar.gz",
+    ("gitleaks", "win32", "amd64"): "gitleaks_{v}_windows_x64.zip",
+    ("gitleaks", "win32", "arm64"): "gitleaks_{v}_windows_arm64.zip",
+    ("gosec", "linux", "amd64"): "gosec_{v}_linux_amd64.tar.gz",
+    ("gosec", "linux", "arm64"): "gosec_{v}_linux_arm64.tar.gz",
+    ("gosec", "darwin", "amd64"): "gosec_{v}_darwin_amd64.tar.gz",
+    ("gosec", "darwin", "arm64"): "gosec_{v}_darwin_arm64.tar.gz",
+    ("gosec", "win32", "amd64"): "gosec_{v}_windows_amd64.tar.gz",
+    ("gosec", "win32", "arm64"): "gosec_{v}_windows_arm64.tar.gz",
+}
+
+
+def _cpu(spec: EngineSpec) -> str:
     machine = platform.machine().lower()
     if machine in {"x86_64", "amd64"}:
-        arch, x64, gnu = "amd64", "x64", "x86_64"
-        trivy = "64bit"
-    elif machine in {"aarch64", "arm64"}:
-        arch, x64, gnu = "arm64", "arm64", "aarch64"
-        trivy = "ARM64"
-    else:
-        raise CliError(f"no {spec.name} build for {machine}")
-    version = spec.version
-    urls = {
-        "nuclei": (
-            "https://github.com/projectdiscovery/nuclei/releases/download/"
-            f"v{version}/nuclei_{version}_{_release_os()}_{arch}.zip"
-        ),
-        "dalfox": (
-            "https://github.com/hahwul/dalfox/releases/download/"
-            f"v{version}/dalfox-v{version}-linux-{gnu}.tar.gz"
-        ),
-        "katana": (
-            "https://github.com/projectdiscovery/katana/releases/download/"
-            f"v{version}/katana_{version}_linux_{arch}.zip"
-        ),
-        "httpx": (
-            "https://github.com/projectdiscovery/httpx/releases/download/"
-            f"v{version}/httpx_{version}_linux_{arch}.zip"
-        ),
-        "trivy": (
-            "https://github.com/aquasecurity/trivy/releases/download/"
-            f"v{version}/trivy_{version}_Linux-{trivy}.tar.gz"
-        ),
-        "osv-scanner": (
-            "https://github.com/google/osv-scanner/releases/download/"
-            f"v{version}/osv-scanner_linux_{arch}"
-        ),
-        "gitleaks": (
-            "https://github.com/gitleaks/gitleaks/releases/download/"
-            f"v{version}/gitleaks_{version}_linux_{x64}.tar.gz"
-        ),
-        "gosec": (
-            "https://github.com/securego/gosec/releases/download/"
-            f"v{version}/gosec_{version}_linux_{arch}.tar.gz"
-        ),
-        "zap": (
+        return "amd64"
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    raise CliError(f"no {spec.name} build for {machine}")
+
+
+def _github(spec: EngineSpec) -> str:
+    cpu = _cpu(spec)
+    if spec.name == "zap":
+        # The adapter runs zap.sh from this archive. The macOS and Windows
+        # releases are installers, not that layout, and this file is pinned.
+        return (
             "https://github.com/zaproxy/zaproxy/releases/download/"
-            f"v{version}/ZAP_{version}_Linux.tar.gz"
-        ),
-    }
-    url = urls.get(spec.name)
-    if url is None:
-        raise CliError(f"{spec.name} has no archive")
-    return url
+            f"v{spec.version}/ZAP_{spec.version}_Linux.tar.gz"
+        )
+    pattern = _ASSETS.get((spec.name, sys.platform, cpu))
+    root = _RELEASE_ROOT.get(spec.name)
+    if pattern is None or root is None:
+        raise CliError(f"no {spec.name} build for {sys.platform} {cpu}")
+    return root.format(v=spec.version) + pattern.format(v=spec.version)
 
 
 def _read_receipt(directory: Path) -> dict[str, object] | None:
@@ -612,7 +799,7 @@ def _read_receipt(directory: Path) -> dict[str, object] | None:
     if not path.is_file():
         return None
     try:
-        loaded = json.loads(path.read_text())
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(loaded, dict):

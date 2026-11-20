@@ -4,7 +4,7 @@ import hashlib
 import json
 import socket
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,7 +43,7 @@ def _obeys(prompt: str) -> str:
 
 
 @contextmanager
-def _chatbot(reply: Callable[[str], str]) -> Iterator[int]:
+def _chatbot(reply: Callable[[str], str]) -> Generator[int]:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))

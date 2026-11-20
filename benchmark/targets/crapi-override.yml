@@ -1,0 +1,97 @@
+# crAPI publishes host ports and pins container_name. This file attaches every
+# service to the harness network (created with --internal) and drops both.
+networks:
+  sandbox:
+    name: ${INSIDIA_SANDBOX_NETWORK:?must be set}
+    external: true
+
+services:
+  crapi-identity:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-crapi-identity
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  crapi-community:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-crapi-community
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  crapi-workshop:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-crapi-workshop
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  crapi-chatbot:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-crapi-chatbot
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  crapi-web:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-crapi-web
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  postgresdb:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-postgresdb
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  mongodb:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-mongodb
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  chromadb:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-chromadb
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  mailhog:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-mailhog
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}
+
+  api.mypremiumdealership.com:
+    container_name: ${INSIDIA_BENCH_PROJECT:?must be set}-api.mypremiumdealership.com
+    ports: !override []
+    networks: !override
+      - sandbox
+    labels:
+      insidia.benchmark: "1"
+      insidia.benchmark.project: ${INSIDIA_BENCH_PROJECT:?must be set}

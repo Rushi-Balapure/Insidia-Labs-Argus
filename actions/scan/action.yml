@@ -47,14 +47,14 @@ runs:
         fi
         case "${INSIDIA_VERSION}" in
           *[!A-Za-z0-9._+-]*)
-            printf '%s\n' "error: version must be a pin such as 0.1.0, not a floating ref" >&2
+            printf '%s\n' "error: version must be a pin such as 1.0.0, not a floating ref" >&2
             exit 1
             ;;
         esac
         case "${INSIDIA_VERSION}" in
           *[0-9]*) ;;
           *)
-            printf '%s\n' "error: version must be a pin such as 0.1.0, not a floating ref" >&2
+            printf '%s\n' "error: version must be a pin such as 1.0.0, not a floating ref" >&2
             exit 1
             ;;
         esac
@@ -75,14 +75,14 @@ runs:
         fi
         case "${INSIDIA_VERSION}" in
           *[!A-Za-z0-9._+-]*)
-            printf '%s\n' "error: version must be a pin such as 0.1.0, not a floating ref" >&2
+            printf '%s\n' "error: version must be a pin such as 1.0.0, not a floating ref" >&2
             exit 1
             ;;
         esac
         case "${INSIDIA_VERSION}" in
           *[0-9]*) ;;
           *)
-            printf '%s\n' "error: version must be a pin such as 0.1.0, not a floating ref" >&2
+            printf '%s\n' "error: version must be a pin such as 1.0.0, not a floating ref" >&2
             exit 1
             ;;
         esac
@@ -111,14 +111,19 @@ runs:
         exit 0
 
     - name: Scan
+      id: scan
       shell: bash
       env:
         INSIDIA_POLICY: ${{ inputs.policy }}
         INSIDIA_FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
+        # The scanner does not receive the job token. Later steps still upload.
+        GITHUB_TOKEN: ""
+        GH_TOKEN: ""
       run: |
         set -euo pipefail
+        rm -f "$RUNNER_TEMP/insidia-scan.json"
         set +e
-        insidia --json scan --policy "$INSIDIA_POLICY" --yes > insidia-scan.json
+        insidia --json scan --policy "$INSIDIA_POLICY" --yes > "$RUNNER_TEMP/insidia-scan.json"
         code=$?
         set -e
         printf '%s\n' "insidia scan exit code: ${code}"
@@ -142,7 +147,7 @@ runs:
         exit "$code"
 
     - name: Collect scan reports
-      if: always()
+      if: always() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure')
       id: reports
       shell: bash
       run: |
@@ -153,8 +158,8 @@ runs:
         found=false
         sarif=false
         run_dir=""
-        if [ -f insidia-scan.json ]; then
-          run_dir="$(python3 - insidia-scan.json <<'PY'
+        if [ -f "$RUNNER_TEMP/insidia-scan.json" ]; then
+          run_dir="$(python3 - "$RUNNER_TEMP/insidia-scan.json" <<'PY'
         import json
         import os
         import re

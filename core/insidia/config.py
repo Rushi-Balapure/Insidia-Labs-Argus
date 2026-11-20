@@ -14,6 +14,7 @@ from insidia.errors import ConfigError
 from insidia.scope import LOCAL_HOSTS, ScopeHost, hostname
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SECRET_ENV_PREFIX = "INSIDIA_"
 _KINDS = frozenset({"chat", "agent", "rag", "mcp", "web", "api", "repo"})
 _PROJECT_FIELDS = frozenset({"version", "policy", "coverage", "scope", "targets", "models"})
 _SCOPE_FIELDS = frozenset({"host", "authorized"})
@@ -122,7 +123,6 @@ def init_destination(path: Path) -> Path:
 
 def init_config(
     destination: Path,
-    *,
     url: str | None = None,
     kind: str | None = None,
 ) -> Path:
@@ -132,13 +132,13 @@ def init_config(
     path.parent.mkdir(parents=True, exist_ok=True)
     destination = path
     if url is None and kind is None:
-        destination.write_text(_INIT)
+        destination.write_text(_INIT, encoding="utf-8")
         return destination
     target_url = url or "http://127.0.0.1:8080/chat"
     if url is not None:
         prepare_init_url(target_url)
     target_kind = prepare_init_kind(target_url, kind)
-    destination.write_text(_starter(target_url, target_kind))
+    destination.write_text(_starter(target_url, target_kind), encoding="utf-8")
     return destination
 
 
@@ -207,7 +207,11 @@ def load_project(path: Path) -> Project:
     if not path.is_file():
         raise ConfigError(f"missing {path}")
     try:
-        loaded = yaml.safe_load(path.read_text())
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        raise ConfigError("insidia.yaml is not UTF-8") from exc
+    try:
+        loaded = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         where = f" at line {mark.line + 1}" if mark is not None else ""
@@ -228,12 +232,20 @@ def load_project(path: Path) -> Project:
 
 
 def validate_secret_ref(secret_ref: str) -> str:
-    """Return the environment variable name. Does not read its value."""
+    """Return the environment variable name. Does not read its value.
+
+    Only names that start with INSIDIA_ are accepted.
+    """
     if not secret_ref.startswith("env:"):
         raise ConfigError("secret_ref must look like env:NAME")
     name = secret_ref.removeprefix("env:")
     if not _ENV_NAME.fullmatch(name):
         raise ConfigError("secret_ref must name one environment variable")
+    if not name.startswith(_SECRET_ENV_PREFIX):
+        raise ConfigError(
+            f"{name} cannot be used as a secret. "
+            "Only environment variables that start with INSIDIA_ can be referenced"
+        )
     return name
 
 

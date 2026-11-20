@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -6,13 +8,9 @@ import pytest
 from insidia.findings import Finding, Observation
 from insidia.mask import mask
 from insidia.policy import MARKDOWN_BEACON, get_policy
-from insidia.runstore import (
-    _PLUGIN_OUTPUT_CAP,
-    _format_epoch,
-    local_time,
-    read_manifest,
-    write_run,
-)
+from insidia.report_html import _PLUGIN_OUTPUT_CAP
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import _format_epoch, local_time, write_run
 from insidia.score import coverage, score_frameworks
 
 _SECRET = "AKIAIOSFODNN7EXAMPLE"
@@ -49,16 +47,21 @@ def test_report_scores_frameworks_and_names_the_engine(tmp_path: Path) -> None:
         },
     ]
     directory = write_run(tmp_path, "run-1", "L1", False, [finding], controls, [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert "OWASP LLM" in html
     assert "OWASP Web" in html
     assert _score_line(html, "OWASP LLM Top 10") == ("1", "0 passed (0 low assurance)", "9")
     assert _score_line(html, "OWASP Web Top 10") == ("0", "1 passed (0 low assurance)", "9")
-    assert "<script" not in html
+    from insidia.report_script import REPORT_SCRIPT
+
+    assert html.count("<script") == 1
+    assert f"<script data-report-ui>{REPORT_SCRIPT}</script>" in html
     assert "prefers-color-scheme: dark" in html
     assert "#101028" in html
-    assert html.split('<p class="status', 1)[1].split("</p>", 1)[0].endswith(
-        "This report is test evidence, not a certification."
+    assert (
+        html.split('<p class="status', 1)[1]
+        .split("</p>", 1)[0]
+        .endswith("This report is test evidence, not a certification.")
     )
     assert "<svg" in html
     assert "owasp-llm:LLM01" in html
@@ -109,7 +112,7 @@ def test_report_scores_frameworks_and_names_the_engine(tmp_path: Path) -> None:
     assert run["results"][0]["properties"]["engine"] == "insidia"
 
 
-def test_report_sections_follow_the_nessus_order(tmp_path: Path) -> None:
+def test_report_sections_prioritize_findings(tmp_path: Path) -> None:
     import re
 
     chat = _bare(
@@ -152,26 +155,26 @@ def test_report_sections_follow_the_nessus_order(tmp_path: Path) -> None:
         started_epoch=1_700_000_000.0,
         scope_hosts=("127.0.0.1",),
     )
-    html = (directory / "report.html").read_text()
-    headings = re.findall(r"<h2[^>]*>([^<]+)</h2>", html)
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    headings = re.findall(r"<h2[^>]*>([^<]+)</h2>", html.split("<footer>", 1)[0])
     assert headings == [
         "Executive summary",
-        "Targets",
         "Findings by severity",
         "Remediation summary",
+        "Targets",
         "Coverage by target",
-        "Framework mapping",
+        "Framework coverage",
         "Scan information",
     ]
     assert html.index("Executive summary") < html.index("Findings by severity")
     assert html.index("Findings by severity") < html.index("Coverage by target")
     assert "OWASP item list" in html
-    assert html.index("Framework mapping") < html.index("OWASP item list")
+    assert html.index("Framework coverage") < html.index("OWASP item list")
     for label in ("Critical", "High", "Medium", "Low", "Info"):
         assert label in html
     payload = json.loads((directory / "findings.json").read_text())
     sarif = json.loads((directory / "results.sarif").read_text())["runs"][0]["results"]
-    shown = [int(item) for item in re.findall(r'class="tile t-[a-z]+"><b>(\d+)</b>', html)]
+    shown = [int(item) for item in re.findall(r'class="severity-row" data-count="(\d+)"', html)]
     assert sum(shown) == len(payload) == len(sarif) == 2
     manifest = json.loads((directory / "manifest.json").read_text())
     assert manifest["finished_at"]
@@ -186,6 +189,8 @@ def test_report_sections_follow_the_nessus_order(tmp_path: Path) -> None:
 def test_manifest_started_at_is_the_scan_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import re
+
     started_epoch = 1_700_000_000.0
     finished_epoch = started_epoch + 5.25
     run_id = "20261016T120000Z-abc123"
@@ -201,7 +206,7 @@ def test_manifest_started_at_is_the_scan_start(
         started_epoch=started_epoch,
     )
     manifest = json.loads((directory / "manifest.json").read_text())
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert manifest["started_at"] == _format_epoch(started_epoch)
     assert manifest["finished_at"] == _format_epoch(finished_epoch)
     assert manifest["finished_at"] > manifest["started_at"]
@@ -213,6 +218,9 @@ def test_manifest_started_at_is_the_scan_start(
     assert finished > started
     elapsed = (finished - started).total_seconds()
     assert abs(elapsed - float(manifest["duration_s"])) <= 2
+    zone = re.compile(r"^(?:Z|[+-]\d{4})$")
+    assert zone.fullmatch(str(manifest["started_at"]).rsplit(" ", 1)[-1])
+    assert zone.fullmatch(str(manifest["finished_at"]).rsplit(" ", 1)[-1])
 
 
 def _wall_clock(stamp: str) -> datetime:
@@ -271,7 +279,7 @@ targets:
     manifest = json.loads((directory / "manifest.json").read_text())
     benchmark = json.loads((directory / "benchmark.json").read_text())
     findings = json.loads((directory / "findings.json").read_text())
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert findings == []
     engines = _scan_cell(html, "Engines")
     assert engines.strip()
@@ -334,7 +342,7 @@ models:
     monkeypatch.setattr("insidia.scan.select", lambda *_args, **_kwargs: [])
     outcome = execute(load_project(tmp_path / "insidia.yaml"), tmp_path)
     manifest = json.loads((outcome.run_dir / "manifest.json").read_text())
-    html = (outcome.run_dir / "report.html").read_text()
+    html = (outcome.run_dir / "report.html").read_text(encoding="utf-8")
     label = "qwen (configured, not used at L1)"
     assert _scan_cell(html, "models/judge") == label
     assert manifest["models"] == {"judge": label}
@@ -491,7 +499,7 @@ def test_finding_cards_list_fields_in_order_and_escape_evidence(tmp_path: Path) 
 
     leaked = "ghp_" + ("b" * 36)
     stripe = "sk_live_" + ("c" * 20)
-    response = f"see <img src=\"https://evil.example/a.png\"> {leaked} {stripe} {_SECRET}"
+    response = f'see <img src="https://evil.example/a.png"> {leaked} {stripe} {_SECRET}'
     finding = _bare(
         track="ai",
         probe="insidia.ai.data_leakage",
@@ -503,7 +511,7 @@ def test_finding_cards_list_fields_in_order_and_escape_evidence(tmp_path: Path) 
         evidence_hash="abc123",
     )
     directory = write_run(tmp_path, "run-card", "L1", False, [finding], [], [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     card = html.split('<details class="finding"', 1)[1].split("</details>", 1)[0]
     labels = re.findall(r"<dt>([^<]+)</dt>", card)
     assert labels == [
@@ -530,6 +538,145 @@ def test_finding_cards_list_fields_in_order_and_escape_evidence(tmp_path: Path) 
     assert "CWE-200" in card
     assert "genai.owasp.org" in card
     assert "insidia rerun run-card" in card
+
+
+def test_report_escapes_untrusted_text_and_sets_content_security_policy(tmp_path: Path) -> None:
+    import base64
+    import hashlib
+    import re
+    from html.parser import HTMLParser
+    from urllib.parse import urlparse
+
+    from insidia.report_script import REPORT_SCRIPT
+
+    script_payload = '"><script>alert(1)</script>'
+    quote_payload = "' onmouseover='x"
+    script_break = "</script><script>alert(2)</script>"
+    javascript_url = "javascript:alert(1)"
+    quote_url = "https://example.com/'onmouseover='x"
+    endpoint = 'https://app.example/"onclick="alert(1)'
+    kind = '"><img src=x onerror=alert(1)>'
+    finding = _bare(
+        title=script_payload,
+        target=quote_payload,
+        response=script_break,
+        engine=script_payload,
+        confidence=quote_payload,
+        references=(
+            javascript_url,
+            "JavaScript:alert(1)",
+            quote_url,
+            "https://example.com/safe",
+            "http://example.com/also",
+            "//evil.example/phish",
+            "/relative/help",
+            "data:text/html,<script>alert(1)</script>",
+            "https://example.com/a\nb",
+        ),
+        location='notes"><script>alert(3)</script>.txt:4',
+        remediation=script_payload,
+        description=quote_payload,
+        synopsis=script_break,
+        observations=(
+            Observation(
+                "insidia",
+                "insidia.web.ssti",
+                "high",
+                "notes:1",
+                script_payload + quote_payload + script_break,
+            ),
+        ),
+    )
+    directory = write_run(
+        tmp_path,
+        "run-xss",
+        script_payload,
+        False,
+        [finding],
+        [
+            {
+                "id": script_payload,
+                "target": quote_payload,
+                "result": "not tested",
+                "detail": script_break,
+            }
+        ],
+        [script_break],
+        targets=((quote_payload, kind, endpoint),),
+    )
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    for payload in (script_payload, quote_payload, script_break, quote_url, endpoint, kind):
+        assert payload not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&#x27; onmouseover=&#x27;x" in html
+    assert "https://example.com/&#x27;onmouseover=&#x27;x" in html
+    assert "https://app.example/&quot;onclick=&quot;alert(1)" in html
+    assert 'href="https://example.com/safe"' in html
+    assert 'href="http://example.com/also"' in html
+    assert 'href="/relative/help"' in html
+    assert 'href="javascript:' not in html.lower()
+    assert "href='javascript:" not in html.lower()
+    assert 'href="//evil.example/phish"' not in html
+    assert "data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<img" not in html
+    assert re.search(r"\shref\s*=\s*[^\"']", html) is None
+
+    scripts = re.findall(r"<script\b([^>]*)>(.*?)</script>", html, flags=re.DOTALL)
+    assert scripts == [(" data-report-ui", REPORT_SCRIPT)]
+    for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html, flags=re.DOTALL):
+        assert script_break not in body
+        assert script_payload not in body
+    assert html.count("</script>") == 1
+    assert html.index("<head>") + len("<head>") == html.index(
+        '<meta http-equiv="Content-Security-Policy"'
+    )
+    assert html.index("Content-Security-Policy") < html.index("<style>")
+    match = re.search(r'<meta http-equiv="Content-Security-Policy" content="([^"]*)"', html)
+    assert match is not None
+    policy = match.group(1)
+    assert policy.startswith("default-src 'none'; img-src data:; style-src ")
+    assert "base-uri 'none'; form-action 'none'" in policy
+    assert policy.endswith("base-uri 'none'; form-action 'none'")
+    assert "unsafe-inline" not in policy
+    assert "frame-ancestors" not in policy
+
+    def source_hash(content: str) -> str:
+        digest = hashlib.sha256(content.encode("utf-8")).digest()
+        return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+    for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html, flags=re.DOTALL):
+        assert f"'{source_hash(body)}'" in policy
+    assert f"'{source_hash(REPORT_SCRIPT)}'" in policy
+    style_src = policy.split("style-src ", 1)[1].split(";", 1)[0]
+    script_src = policy.split("script-src ", 1)[1].split(";", 1)[0]
+    assert style_src.count("'sha256-") >= 1
+    assert script_src == f"'{source_hash(REPORT_SCRIPT)}'"
+    assert 'id="check-filter-all"' in html
+
+    class _Audit(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.hrefs: list[str] = []
+            self.scripts = 0
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            names = [name.lower() for name, _value in attrs]
+            assert not any(name.startswith("on") for name in names)
+            if tag == "script":
+                self.scripts += 1
+            for name, value in attrs:
+                if name.lower() == "href":
+                    href = value or ""
+                    self.hrefs.append(href)
+                    assert urlparse(href).scheme.lower() in {"", "http", "https"}
+
+    auditor = _Audit()
+    auditor.feed(html)
+    assert auditor.scripts == 1
+    assert javascript_url not in auditor.hrefs
+    assert all(not href.lower().startswith("javascript:") for href in auditor.hrefs)
+    assert quote_url in auditor.hrefs
+    assert "https://example.com/safe" in auditor.hrefs
 
 
 def test_finding_card_shows_confidence_for_one_and_two_engines(tmp_path: Path) -> None:
@@ -567,7 +714,7 @@ def test_finding_card_shows_confidence_for_one_and_two_engines(tmp_path: Path) -
         risk_factors=("base 9.8",),
     )
     directory = write_run(tmp_path, "run-ux6", "L1", False, [shared, alone], [], [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     cards = {
         card.split('class="pid">', 1)[1].split("<", 1)[0]: card.split("</details>", 1)[0]
         for card in html.split('<details class="finding"')[1:]
@@ -656,10 +803,10 @@ def test_four_hits_of_one_check_group_and_two_targets_filter(tmp_path: Path) -> 
             ("shop", "web", "GET http://127.0.0.1:8090/ping"),
         ),
     )
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert html.count('<details class="finding"') == 2
     assert html.count('<span class="pid">INS-DEP-001</span>') == 1
-    assert 'href="#findings">Findings (5)</a>' in html
+    assert 'href="?page=findings" data-page-link="findings">Findings (5)</a>' in html
     payload = json.loads((directory / "findings.json").read_text())
     sarif = json.loads((directory / "results.sarif").read_text())["runs"][0]["results"]
     assert len(payload) == len(sarif) == 5
@@ -710,7 +857,7 @@ def test_three_hits_of_one_check_stay_separate_cards(tmp_path: Path) -> None:
         for line in (1, 2, 3)
     ]
     directory = write_run(tmp_path, "run-r6-flat", "L1", False, findings, [], [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert html.count('<details class="finding"') == 3
     assert html.count('<span class="pid">INS-CODE-001</span>') == 3
     assert '<ul class="locations">' not in html
@@ -790,7 +937,7 @@ def test_plugin_output_caps_a_long_passwd_body(tmp_path: Path) -> None:
         ),
     )
     directory = write_run(tmp_path, "run-lfi", "L1", False, [finding], [], [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     card = html.split('<details class="finding"', 1)[1].split("</details>", 1)[0]
     plugin = card.split("Plugin output", 1)[1].split("<dt>", 1)[0]
     assert plugin.count("<pre>") == 1
@@ -835,13 +982,15 @@ def test_not_tested_rows_say_why_and_passes_are_counted_honestly(tmp_path: Path)
         },
     ]
     directory = write_run(tmp_path, "run-cov", "L1", True, [], controls, [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert "not evidence that those risks are absent" in html
     reasons = []
-    for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+    for row in re.findall(
+        r'<details class="check-accordion coverage-row"[^>]*>(.*?)</details>', html, re.S
+    ):
         if "NOT TESTED" not in row:
             continue
-        why = re.search(r'data-l="Why">(.*?)</td>', row)
+        why = re.search(r'data-l="Why">(.*?)</div>', row)
         assert why is not None
         text = why.group(1).strip()
         assert text
@@ -861,7 +1010,7 @@ def test_not_tested_rows_say_why_and_passes_are_counted_honestly(tmp_path: Path)
 
 def test_report_css_fits_a_390px_screen(tmp_path: Path) -> None:
     directory = write_run(tmp_path, "run-narrow", "L1", True, [], [], [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert "@media (max-width:390px)" in html
     assert "@media print" in html
     assert "nav { display: none; }" in html
@@ -878,8 +1027,7 @@ _NOT_A_CERTIFICATION = "This report is test evidence, not a certification."
 
 
 def _summary_paragraph(html: str) -> str:
-    block = html.split('<h2 id="summary">Executive summary</h2>', 1)[1]
-    paragraph = block.split("<p", 1)[1]
+    paragraph = html.split('<p class="status ', 1)[1]
     return paragraph.split(">", 1)[1].split("</p>", 1)[0]
 
 
@@ -922,7 +1070,7 @@ def _nova_controls() -> list[dict[str, str]]:
 
 def test_fail_summary_names_the_run_and_is_not_a_certification(tmp_path: Path) -> None:
     directory = write_run(tmp_path, "run-fail", "L1", False, [_leak()], _nova_controls(), [])
-    text = _summary_paragraph((directory / "report.html").read_text())
+    text = _summary_paragraph((directory / "report.html").read_text(encoding="utf-8"))
     assert text == (
         "Insidia ran 2 of 3 checks against 1 target (nova). "
         "Policy L1 did not pass: 1 finding (1 critical, 0 high, 0 medium, 0 low, 0 info). "
@@ -951,7 +1099,7 @@ def test_pass_summary_follows_the_same_shape(tmp_path: Path) -> None:
         },
     ]
     directory = write_run(tmp_path, "run-pass", "L1", True, [], controls, [])
-    text = _summary_paragraph((directory / "report.html").read_text())
+    text = _summary_paragraph((directory / "report.html").read_text(encoding="utf-8"))
     assert text == (
         "Insidia ran 1 of 2 checks against 1 target (shop). "
         "Policy L1 passed: 0 findings (0 critical, 0 high, 0 medium, 0 low, 0 info). "
@@ -976,7 +1124,7 @@ def test_incomplete_summary_follows_the_same_shape(tmp_path: Path) -> None:
         [],
         execution_status="incomplete",
     )
-    text = _summary_paragraph((directory / "report.html").read_text())
+    text = _summary_paragraph((directory / "report.html").read_text(encoding="utf-8"))
     assert text == (
         "Insidia ran 2 of 3 checks against 1 target (nova). "
         "The scan did not finish: incomplete. "
@@ -1011,7 +1159,7 @@ def test_low_assurance_passes_are_counted_from_the_field(tmp_path: Path) -> None
         },
     ]
     directory = write_run(tmp_path, "run-weak", "L1", True, [], controls, [])
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     text = _summary_paragraph(html)
     assert "1 passed check has low assurance and 0 checks were not tested." in text
     assert "0 passed checks have low assurance" not in text
@@ -1020,7 +1168,7 @@ def test_low_assurance_passes_are_counted_from_the_field(tmp_path: Path) -> None
     assert _owasp_result(html, "owasp-web:A03") == "pass (low assurance)"
     assert _owasp_result(html, "owasp-web:A05") == "pass"
     weak_badge = _coverage_badge(html, "web.ssti")
-    assert "PASS (low assurance)" in weak_badge
+    assert f"PASS (low assurance: {note})" in weak_badge
     assert "res-low" in weak_badge
     assert "res-pass" not in weak_badge
     full_badge = _coverage_badge(html, "web.headers")
@@ -1073,18 +1221,26 @@ def test_an_owasp_row_with_a_strong_pass_stays_plain() -> None:
 
 
 def _coverage_badge(html: str, check_id: str) -> str:
-    row = html.split(f"<code>{check_id}</code>", 1)[1].split("</tr>", 1)[0]
-    return row.split('data-l="Result">', 1)[1].split("</td>", 1)[0]
+    import re
+
+    row = html.split(f"<code>{check_id}</code>", 1)[1].split("</summary>", 1)[0]
+    badge = re.search(r'data-l="Result">(<span[^>]*>.*?</span>)', row)
+    assert badge is not None
+    return badge.group(1)
 
 
 def _owasp_result(html: str, control_id: str) -> str:
     row = next(line for line in html.splitlines() if f">{control_id}<" in line)
     cells = row.split("<td")
-    return cells[-1].split(">", 1)[1].split("<", 1)[0]
+    import re
+
+    cell = cells[-1].split(">", 1)[1].split("</td>", 1)[0]
+    return re.sub(r"<[^>]+>", "", cell)
 
 
 def _score_line(html: str, title: str) -> tuple[str, str, str]:
-    row = next(line for line in html.splitlines() if title in line)
+    table = html.split('<table class="framework-scores">', 1)[1].split("</table>", 1)[0]
+    row = next(line for line in table.splitlines() if title in line)
     cells = row.split("<td")
     values = [cell.split(">", 1)[1].split("<", 1)[0] for cell in cells[1:]]
     assert values[0] == title
@@ -1234,9 +1390,7 @@ def test_rerun_records_provenance_and_finding_state(tmp_path: Path) -> None:
         title="Dropped finding",
         evidence_hash="hash-dropped",
         response=masked,
-        observations=(
-            Observation("insidia", "insidia.web.ssti", "high", "/ping", masked),
-        ),
+        observations=(Observation("insidia", "insidia.web.ssti", "high", "/ping", masked),),
     )
     fresh = _bare(title="New finding", evidence_hash="hash-new", response="new reply")
     run_a = "20261018T000000Z-aaaaaa"
@@ -1249,7 +1403,7 @@ def test_rerun_records_provenance_and_finding_state(tmp_path: Path) -> None:
     dropped_stored = next(item for item in stored if item["evidence_hash"] == "hash-dropped")
     assert token not in json.dumps(dropped_stored)
     assert all(item["state"] == "new" and item["first_seen_run"] == run_a for item in stored)
-    assert "Fixed since" not in (directory_a / "report.html").read_text()
+    assert "Fixed since" not in (directory_a / "report.html").read_text(encoding="utf-8")
 
     directory_b = write_run(
         tmp_path,
@@ -1270,7 +1424,7 @@ def test_rerun_records_provenance_and_finding_state(tmp_path: Path) -> None:
     assert by_hash["hash-kept"]["first_seen_run"] == run_a
     assert by_hash["hash-new"]["state"] == "new"
     assert by_hash["hash-new"]["first_seen_run"] == run_b
-    html = (directory_b / "report.html").read_text()
+    html = (directory_b / "report.html").read_text(encoding="utf-8")
     assert f"Fixed since {run_a}" in html
     assert "Dropped finding" in html
     assert "hash-dropped" in html
@@ -1288,9 +1442,7 @@ def test_rerun_records_provenance_and_finding_state(tmp_path: Path) -> None:
     assert "state" not in result["properties"]
 
     run_c = "20261018T000002Z-cccccc"
-    directory_c = write_run(
-        tmp_path, run_c, "L1", False, [kept], [], [], rerun_of=run_b
-    )
+    directory_c = write_run(tmp_path, run_c, "L1", False, [kept], [], [], rerun_of=run_b)
     later = json.loads((directory_c / "findings.json").read_text())
     assert later[0]["evidence_hash"] == "hash-kept"
     assert later[0]["state"] == "still_open"
@@ -1348,7 +1500,7 @@ def test_baseline_uses_digest_then_target_names_and_skips_dot_dirs(tmp_path: Pat
     payload = json.loads((directory / "findings.json").read_text())
     assert payload[0]["state"] == "still_open"
     assert payload[0]["first_seen_run"] == older
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert f"Fixed since {older}" in html
     assert "Other finding" in html
     assert "Hidden finding" not in html
@@ -1381,9 +1533,9 @@ def test_baseline_uses_digest_then_target_names_and_skips_dot_dirs(tmp_path: Pat
     followed_payload = json.loads((followed / "findings.json").read_text())
     assert followed_payload[0]["state"] == "still_open"
     assert followed_payload[0]["first_seen_run"] == named.name
-    assert "Fixed since .hidden" not in (followed / "report.html").read_text()
+    assert "Fixed since .hidden" not in (followed / "report.html").read_text(encoding="utf-8")
     lone = write_run(tmp_path / "lone", "run-b", "L1", False, [kept], [], [])
-    assert "Fixed since" not in (lone / "report.html").read_text()
+    assert "Fixed since" not in (lone / "report.html").read_text(encoding="utf-8")
     # A dot-named run is not a baseline for a later run that shares its digest.
     dots = tmp_path / "dots"
     write_run(dots, ".hidden", "L1", False, [kept], [], [], config_digest=digest)
@@ -1400,7 +1552,80 @@ def test_baseline_uses_digest_then_target_names_and_skips_dot_dirs(tmp_path: Pat
     dotted_payload = json.loads((dotted / "findings.json").read_text())
     assert dotted_payload[0]["state"] == "new"
     assert dotted_payload[0]["first_seen_run"] == "run-c"
-    assert "Fixed since" not in (dotted / "report.html").read_text()
+    assert "Fixed since" not in (dotted / "report.html").read_text(encoding="utf-8")
+
+
+def test_same_second_run_ids_follow_finish_order(tmp_path: Path) -> None:
+    """A later run in one UTC second can sort before the run it is compared with."""
+    root = tmp_path / "order"
+    early_id = "20261120T120000Z-ffffff"
+    recent_id = "20261120T120000Z-800000"
+    current_id = "20261120T120000Z-000000"
+    assert current_id < recent_id < early_id
+    early = _bare(title="Early finding", evidence_hash="hash-early")
+    recent = _bare(title="Recent finding", evidence_hash="hash-recent")
+    targets = (("shop", "web", "http://127.0.0.1/"),)
+
+    def yaml(port: int) -> bytes:
+        return f"version: 1\ntargets:\n  shop:\n    url: http://127.0.0.1:{port}/\n".encode()
+
+    early_dir = write_run(
+        root,
+        early_id,
+        "L1",
+        False,
+        [early],
+        [],
+        [],
+        config_text=yaml(1),
+        targets=targets,
+    )
+    recent_dir = write_run(
+        root,
+        recent_id,
+        "L1",
+        False,
+        [recent],
+        [],
+        [],
+        config_text=yaml(2),
+        targets=targets,
+    )
+    now_ns = time.time_ns()
+    os.utime(early_dir, ns=(now_ns - 10_000_000_000, now_ns - 10_000_000_000))
+    os.utime(recent_dir, ns=(now_ns - 5_000_000_000, now_ns - 5_000_000_000))
+    # Next UTC second, finished earlier on disk: a greater id must not become the baseline.
+    later_id = "20261120T120001Z-ffffff"
+    later_dir = write_run(
+        root,
+        later_id,
+        "L1",
+        False,
+        [early],
+        [],
+        [],
+        config_text=yaml(9),
+        targets=targets,
+    )
+    os.utime(later_dir, ns=(now_ns - 30_000_000_000, now_ns - 30_000_000_000))
+    directory = write_run(
+        root,
+        current_id,
+        "L1",
+        False,
+        [recent],
+        [],
+        [],
+        config_text=yaml(3),
+        targets=targets,
+    )
+    payload = json.loads((directory / "findings.json").read_text(encoding="utf-8"))
+    assert payload[0]["state"] == "still_open"
+    assert payload[0]["first_seen_run"] == recent_id
+    html = (directory / "report.html").read_text(encoding="utf-8")
+    assert f"fixed since {recent_id}." in html
+    assert f"Fixed since {later_id}" not in html
+    assert "Early finding" not in html
 
 
 def test_still_open_without_first_seen_uses_the_baseline_run(tmp_path: Path) -> None:
@@ -1434,7 +1659,7 @@ def test_still_open_without_first_seen_uses_the_baseline_run(tmp_path: Path) -> 
     payload = json.loads((directory / "findings.json").read_text())
     assert payload[0]["state"] == "still_open"
     assert payload[0]["first_seen_run"] == "legacy-run"
-    html = (directory / "report.html").read_text()
+    html = (directory / "report.html").read_text(encoding="utf-8")
     assert "Fixed since legacy-run" in html
     assert token not in html
     assert "raw evidence" not in html

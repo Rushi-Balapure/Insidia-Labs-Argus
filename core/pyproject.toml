@@ -1,6 +1,6 @@
 [project]
 name = "insidia"
-version = "0.1.0"
+version = "1.0.0"
 description = "Insidia Labs CLI for scanning AI apps and web targets on your machine."
 requires-python = ">=3.12"
 dependencies = [
@@ -27,11 +27,15 @@ packages = ["insidia"]
 "insidia/mappings/owasp-web.yaml" = "insidia/mappings/owasp-web.yaml"
 "insidia/mappings/owasp-api.yaml" = "insidia/mappings/owasp-api.yaml"
 "insidia/brand/mark.svg" = "insidia/brand/mark.svg"
+"insidia/brand/lockup-dark.svg" = "insidia/brand/lockup-dark.svg"
+"insidia/brand/lockup-light.svg" = "insidia/brand/lockup-light.svg"
 
 [dependency-groups]
 dev = [
   "mypy>=1.17",
   "pytest>=8.4",
+  "pytest-cov>=7.1",
+  "pytest-xdist>=3.8",
   "ruff>=0.12",
 ]
 
@@ -51,3 +55,15 @@ mypy_path = "."
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+  "error",
+]
+
+[tool.coverage.run]
+source = ["insidia"]
+
+[tool.coverage.report]
+fail_under = 88
+precision = 2
+show_missing = true
+skip_covered = true

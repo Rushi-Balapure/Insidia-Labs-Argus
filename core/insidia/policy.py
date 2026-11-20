@@ -73,7 +73,6 @@ def _control(
     taxonomy: tuple[str, ...] = ("benchmark",),
     severity: str = "high",
     track: str = "classic",
-    *,
     check_id: str = "",
     title: str = "",
     synopsis: str = "",
@@ -452,6 +451,7 @@ _CONTROLS = (
         _WEB_API,
         "Remove the vulnerable server banner.",
         taxonomy=("owasp-web:A06",),
+        title="Server banner matches a known CVE",
     ),
     _control(
         "infra.tls",

@@ -84,6 +84,7 @@ def test_redirect_to_an_unlisted_host_is_rejected(tmp_path: Path) -> None:
         raise AssertionError("expected CliError")
     finally:
         server.shutdown()
+        server.server_close()
 
 
 def test_redirect_to_another_in_scope_host_is_refused(tmp_path: Path) -> None:
@@ -133,7 +134,9 @@ def test_redirect_to_another_in_scope_host_is_refused(tmp_path: Path) -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -182,7 +185,9 @@ def test_redirect_to_another_port_is_refused(tmp_path: Path) -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -215,6 +220,7 @@ def test_same_origin_redirect_is_followed(tmp_path: Path) -> None:
         )
     finally:
         server.shutdown()
+        server.server_close()
     assert body == "land"
 
 
@@ -242,6 +248,7 @@ def test_redirect_with_a_raw_space_returns_the_302(location: str) -> None:
         )
     finally:
         server.shutdown()
+        server.server_close()
     assert status == 302
     assert headers.get("location") == location
     assert seen == ["/go"]
@@ -291,7 +298,9 @@ def test_spaced_location_that_changes_port_is_not_contacted() -> None:
         raise AssertionError("expected ScopeError")
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert hit["followed"] is False
 
 
@@ -347,7 +356,9 @@ targets:
         code = main(["scan", "--config", str(config), "--quiet"])
     finally:
         server.shutdown()
+        server.server_close()
         other.shutdown()
+        other.server_close()
     assert code == 2
     assert hit["followed"] is False
     benchmark = json.loads(_latest(tmp_path, "benchmark.json").read_text())
@@ -393,7 +404,7 @@ def test_a_refused_redirect_keeps_an_earlier_finding(
 
 
 def _scan_then_refuse_redirect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, finding: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finding: bool
 ) -> tuple[int, dict[str, object], list[dict[str, object]], int, str]:
     """Scan a finished target, then refuse a port-changing redirect on the next one."""
     followed = {"n": 0}
@@ -474,6 +485,7 @@ targets:
     finally:
         for server in (kept, second, other):
             server.shutdown()
+            server.server_close()
     benchmark = json.loads(_latest(tmp_path, "benchmark.json").read_text())
     findings = json.loads(_latest(tmp_path, "findings.json").read_text())
     return code, benchmark, findings, followed["n"], hop
@@ -527,15 +539,26 @@ def test_scan_finds_the_sandbox_plants_and_passes_a_clean_target(tmp_path: Path)
         attacks = {item["attack"] for item in findings}
         assert engines == {"insidia"}
         assert attacks == {"ai.data_leakage", "web.ssti"}
-        report = _latest(tmp_path, "report.html").read_text()
+        report = _latest(tmp_path, "report.html").read_text(encoding="utf-8")
         assert "insidia.ai.data_leakage" in report
-        assert "<table>" in report
+        assert '<table class="framework-scores">' in report
 
         clean = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
         threading.Thread(target=clean.serve_forever, daemon=True).start()
         try:
             _write(tmp_path, int(clean.server_address[1]), "data_leakage", "ssti")
             assert main(["scan", "--config", str(tmp_path / "insidia.yaml")]) == 0
+            finished = _finished_runs(tmp_path)
+            assert len(finished) == 2
+            first, second = sorted(finished, key=lambda path: path.stat().st_mtime_ns)
+            first_manifest = json.loads((first / "manifest.json").read_text(encoding="utf-8"))
+            second_manifest = json.loads((second / "manifest.json").read_text(encoding="utf-8"))
+            assert first_manifest["config_digest"] != second_manifest["config_digest"]
+            report = (second / "report.html").read_text(encoding="utf-8")
+            # Different ports change the digest, so this baseline is the target-name match.
+            # Finish time picks it even when the later run's id sorts first in that second.
+            assert f"Fixed since {first.name}" in report
+            assert f"fixed since {first.name}." in report
         finally:
             clean.shutdown()
             clean.server_close()
@@ -658,6 +681,15 @@ def test_trivy_and_osv_scanner_are_named_in_the_scan_output(
 def _latest(root: Path, name: str) -> Path:
     runs = sorted((root / ".insidia" / "runs").iterdir())
     return runs[-1] / name
+
+
+def _finished_runs(root: Path) -> list[Path]:
+    runs = root / ".insidia" / "runs"
+    return [
+        path
+        for path in runs.iterdir()
+        if not path.name.startswith(".") and path.is_dir() and not path.is_symlink()
+    ]
 
 
 def _free_port() -> int:

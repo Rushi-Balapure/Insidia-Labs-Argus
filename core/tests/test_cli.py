@@ -8,7 +8,8 @@ from insidia.config import load_project
 from insidia.engines import install
 from insidia.findings import Finding
 from insidia.probes import Attempt
-from insidia.runstore import local_time, read_manifest, write_run
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import local_time, write_run
 from insidia.scan import ScanOutcome
 
 
@@ -193,7 +194,7 @@ def test_run_stores_the_config_and_rerun_uses_that_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "configured-secret-value-xyz"
-    monkeypatch.setenv("APP_TOKEN", secret)
+    monkeypatch.setenv("INSIDIA_APP_TOKEN", secret)
     config = tmp_path / "insidia.yaml"
     config.write_text(
         _CHAT.replace(
@@ -203,7 +204,7 @@ def test_run_stores_the_config_and_rerun_uses_that_snapshot(
             f"      Authorization: Bearer {secret}\n"
             "    auth:\n"
             "      header: Authorization\n"
-            "      secret_ref: env:APP_TOKEN\n"
+            "      secret_ref: env:INSIDIA_APP_TOKEN\n"
             "# planted AKIAIOSFODNN7EXAMPLE\n",
         )
     )
@@ -222,7 +223,7 @@ def test_run_stores_the_config_and_rerun_uses_that_snapshot(
     text = stored.decode()
     assert secret not in text
     assert "AKIAIOSFODNN7EXAMPLE" not in text
-    assert "secret_ref: env:APP_TOKEN" in text
+    assert "secret_ref: env:INSIDIA_APP_TOKEN" in text
     assert secret not in json.dumps(manifest)
     recorded = load_project(run_dir / "insidia.yaml")
     assert recorded.targets[0].name == "chat"
