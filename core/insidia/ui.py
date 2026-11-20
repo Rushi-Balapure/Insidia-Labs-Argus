@@ -39,6 +39,7 @@ class Event:
     unit: str = ""
     # "low" on a pass that is not a full pass. Empty on every other row.
     assurance: str = ""
+    assurance_reason: str = ""
 
 
 def wants_color(stream: TextIO, no_color: bool = False) -> bool:
@@ -313,9 +314,12 @@ class ScanView:
         if low:
             self.low_assurance += 1
         status = "low" if low else event.result
+        low_label = "pass (low assurance)"
+        if event.assurance_reason:
+            low_label = f"pass (low assurance: {event.assurance_reason})"
         label = {
             "pass": "pass",
-            "low": "pass (low assurance)",
+            "low": low_label,
             "fail": "FAIL",
             "skipped": "skipped",
             "inconclusive": "incomplete",

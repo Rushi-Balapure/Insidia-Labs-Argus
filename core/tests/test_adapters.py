@@ -225,6 +225,7 @@ def test_builtin_ssti_hits_a_web_target_and_skips_a_chat_target(tmp_path: Path) 
         skipped = run(adapter, spec, target(kind="chat", url=url), _project(), tmp_path, control)
     finally:
         server.shutdown()
+        server.server_close()
     assert len(hits.hits) == 1
     assert hits.hits[0].evidence.isdigit()
     assert hits.error == ""

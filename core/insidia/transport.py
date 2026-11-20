@@ -19,7 +19,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 from insidia.config import Target, resolve_secret
-from insidia.errors import CliError, ConfigError, HttpStatus, ProbeError, ScopeError
+from insidia.egress import handlers, open_socket
+from insidia.errors import CliError, ConfigError, HttpStatus, ProbeError, ProbeTimeout, ScopeError
 from insidia.scope import ScopeHost, check_url, redirect_refusal
 
 _MAX_BODY = 1_000_000
@@ -215,7 +216,7 @@ def _websocket(target: Target, payload: str, scope: tuple[ScopeHost, ...]) -> st
     if parsed.hostname is None:
         raise ConfigError("URL is missing a host")
     port = parsed.port or (443 if parsed.scheme == "wss" else 80)
-    sock = socket.create_connection((parsed.hostname, port), timeout=10)
+    sock = open_socket(parsed.hostname, port, 10)
     try:
         if parsed.scheme == "wss":
             sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parsed.hostname)
@@ -275,8 +276,8 @@ def fetch(
     returned to the probe.
     """
     opener = urllib.request.OpenerDirector()
-    opener.add_handler(urllib.request.HTTPHandler())
-    opener.add_handler(urllib.request.HTTPSHandler())
+    for handler in handlers():
+        opener.add_handler(handler)
     origin = url
     current = url
     request_headers = dict(headers or {})
@@ -323,11 +324,11 @@ def fetch(
                     body = None
                 continue
         except TimeoutError as exc:
-            raise ProbeError("target timed out") from exc
+            raise ProbeTimeout("target timed out") from exc
         except urllib.error.URLError as exc:
             reason = exc.reason
             if isinstance(reason, TimeoutError | socket.timeout):
-                raise ProbeError("target timed out") from exc
+                raise ProbeTimeout("target timed out") from exc
             raise ProbeError("endpoint is unreachable") from exc
         except http.client.InvalidURL as exc:
             raise ProbeError("redirect Location is not a valid URL") from exc

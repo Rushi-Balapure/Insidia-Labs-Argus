@@ -116,6 +116,9 @@ runs:
       env:
         INSIDIA_POLICY: ${{ inputs.policy }}
         INSIDIA_FAIL_ON_INCONCLUSIVE: ${{ inputs.fail-on-inconclusive }}
+        # The scanner does not receive the job token. Later steps still upload.
+        GITHUB_TOKEN: ""
+        GH_TOKEN: ""
       run: |
         set -euo pipefail
         rm -f "$RUNNER_TEMP/insidia-scan.json"

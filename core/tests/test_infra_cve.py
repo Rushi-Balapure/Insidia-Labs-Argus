@@ -183,7 +183,7 @@ def test_accept_banner_only_records_low_assurance(
         code, latest = _scan(tmp_path, monkeypatch, port, "--accept-banner-only", quiet=False)
     err = capsys.readouterr().err
     cli = next(line for line in err.splitlines() if "infra.cve" in line and "pass" in line)
-    assert "pass (low assurance)" in cli
+    assert "pass (low assurance:" in cli
     assert cli.split()[0] not in {"✔", "+"}
     assert "insidia" in cli
     assert "not a vulnerability assessment" in cli
@@ -209,7 +209,7 @@ def test_accept_banner_only_records_low_assurance(
     match = re.search(r'data-l="Result">(<span[^>]*>.*?</span>)', cell)
     assert match is not None
     badge = match.group(1)
-    assert "PASS (low assurance)" in badge
+    assert "PASS (low assurance:" in badge
     assert "res-low" in badge
     assert "res-pass" not in badge
     assert "not a vulnerability assessment" in cell

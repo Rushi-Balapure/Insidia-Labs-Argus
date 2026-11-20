@@ -78,6 +78,10 @@ insidia upgrade --check   # only report whether a newer release exists
 insidia upgrade           # install the latest release
 ```
 
+`insidia upgrade` installs the wheel attached to the GitHub release after its SHA-256 matches the published checksum. It does not install from the git tag, because a tag can be moved.
+
+`insidia engines install` only installs hash-pinned engines. Python engines use a lock file, promptfoo uses `npm ci`, and each downloaded archive must match a pinned SHA-256. `--allow-unverified` does not turn those checks off.
+
 Release notes are in [CHANGELOG.md](CHANGELOG.md) and on the [releases page](https://github.com/Rushi-Balapure/Insidia-Labs-Argus/releases).
 
 ## Quickstart
@@ -131,7 +135,7 @@ Use `insidia engines list` to see available engines. To add engines, name them e
 
 `insidia.yaml` holds your app's target and scope. Localhost is the default. Test only systems you own or have permission to test; every non-local host needs `authorized: true` in the scope and `--yes` when scanning.
 
-Keep credentials in environment variables and reference them with `secret_ref: env:APP_TOKEN`. Findings mask detected secrets, for example `[AWS_ACCESS_KEY len=20 fp=3f9a1c07]`.
+Keep credentials in environment variables whose names start with `INSIDIA_` and reference them with `secret_ref: env:INSIDIA_APP_TOKEN`. Insidia rejects any other variable name and does not read it. Findings mask detected secrets, for example `[AWS_ACCESS_KEY len=20 fp=3f9a1c07]`. Configured values of at least four characters are masked only as whole tokens; shorter values are left as written so ordinary words stay intact. Password, API key, token, and authorization values are masked in place and the key stays visible.
 
 [Configuration reference](https://insidialabs.com/docs/start/config/) · [Scope and permissions](https://insidialabs.com/docs/start/scope/) · [Run in CI](https://insidialabs.com/docs/guides/ci/)
 

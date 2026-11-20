@@ -53,6 +53,7 @@ targets:
         assert main(["scan", "--config", str(config)]) == 1
     finally:
         server.shutdown()
+        server.server_close()
     assert {"query": "{{7*7}}"} in seen
     findings = json.loads(_findings(tmp_path).read_text())
     assert findings[0]["attack"] == "web.ssti"
