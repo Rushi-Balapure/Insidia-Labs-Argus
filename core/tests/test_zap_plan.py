@@ -27,7 +27,7 @@ jobs:
   - type: report
     parameters:
       template: traditional-json
-      reportDir: /tmp/insidia-zap-workspace
+      reportDir: {workspace}
       reportFile: report.json
 """
 _HOSTILE = (
@@ -98,7 +98,8 @@ def test_normal_plan_matches_expected_structure(tmp_path: Path) -> None:
 
 def test_normal_plan_matches_legacy_template() -> None:
     text = _zap_plan(_NORMAL_URL, _LEGACY_WORKSPACE, _REPORT)
-    assert yaml.safe_load(text) == yaml.safe_load(_LEGACY_NORMAL)
+    legacy = _LEGACY_NORMAL.format(workspace=_LEGACY_WORKSPACE)
+    assert yaml.safe_load(text) == yaml.safe_load(legacy)
 
 
 def test_hostile_targets_stay_plain_strings(tmp_path: Path) -> None:
