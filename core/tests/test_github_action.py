@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import yaml
 _ROOT = Path(__file__).resolve().parents[2]
 _ACTION = _ROOT / "actions" / "scan" / "action.yml"
 _EXAMPLE = _ROOT / ".github" / "workflows" / "insidia-scan.yml"
+_FAILING = _ROOT / ".github" / "workflows" / "insidia-failing-scan.yml"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _PAYLOAD = "$(id)"
 
@@ -109,14 +111,34 @@ def _fill(directory: Path, marker: str) -> None:
         (directory / name).write_text(f"{marker}:{name}\n", encoding="utf-8")
 
 
+def _bash() -> str:
+    if sys.platform != "win32":
+        return "bash"
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if git_bash.is_file():
+        return str(git_bash)
+    pytest.skip("Git Bash is not installed")
+
+
+def _runner_temp(workspace: Path) -> Path:
+    path = workspace.parent / f"{workspace.name}-runner-temp"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_scan_json(workspace: Path, body: str) -> None:
+    (_runner_temp(workspace) / "insidia-scan.json").write_text(body, encoding="utf-8")
+
+
 def _run_collect(workspace: Path) -> tuple[subprocess.CompletedProcess[str], str]:
     output = workspace / "github-output.txt"
     output.unlink(missing_ok=True)
     env = os.environ.copy()
     env["GITHUB_WORKSPACE"] = str(workspace)
     env["GITHUB_OUTPUT"] = str(output)
+    env["RUNNER_TEMP"] = str(_runner_temp(workspace))
     completed = subprocess.run(
-        ["bash", "-c", _collect_script()],
+        [_bash(), "-c", _collect_script()],
         cwd=workspace,
         env=env,
         capture_output=True,
@@ -172,6 +194,106 @@ def test_action_checkout_is_the_only_install_source() -> None:
     assert "exit 1" in mismatch
 
 
+def _job_steps(path: Path) -> list[dict]:
+    document = yaml.safe_load(path.read_text())
+    job = next(iter(document["jobs"].values()))
+    return list(job["steps"])
+
+
+def _assert_pull_request_uses_the_base(path: Path) -> None:
+    text = path.read_text()
+    assert "pull_request_target" not in text
+    assert "git clone" not in text
+    steps = _job_steps(path)
+    checkouts = [step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")]
+    assert len(checkouts) == 2
+    for step in checkouts:
+        assert step["with"]["persist-credentials"] is False
+        pin = str(step["uses"]).rsplit("@", 1)[-1]
+        assert _SHA.fullmatch(pin.split(" ", 1)[0])
+    base = next(
+        step for step in checkouts if step.get("if") == "github.event_name == 'pull_request'"
+    )
+    other = next(
+        step for step in checkouts if step.get("if") == "github.event_name != 'pull_request'"
+    )
+    assert base["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert other["with"]["ref"] == "${{ github.sha }}"
+    read = next(step for step in steps if "git show" in step.get("run", ""))
+    assert read["if"] == "github.event_name == 'pull_request'"
+    script = str(read["run"])
+    assert "${{" not in script
+    assert read["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert 'git show "${BASE_SHA}:insidia.yaml"' in script
+    assert '>"$RUNNER_TEMP/insidia.yaml"' in script or '> "$RUNNER_TEMP/insidia.yaml"' in script
+    assert "rm -f insidia.yaml" in script
+    write = next(step for step in steps if "cat > insidia.yaml" in step.get("run", ""))
+    assert "pull_request" in str(write["if"])
+    assert "hashFiles('insidia.yaml')" in str(write["if"])
+    for step in steps:
+        if "run" in step:
+            assert "${{" not in step["run"]
+
+
+def test_pull_request_scan_reads_config_from_the_base() -> None:
+    _assert_pull_request_uses_the_base(_EXAMPLE)
+    _assert_pull_request_uses_the_base(_FAILING)
+
+
+def test_base_config_script_discards_the_worktree_file(tmp_path: Path) -> None:
+    read = next(step for step in _job_steps(_EXAMPLE) if "git show" in step.get("run", ""))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "insidia.yaml").write_text("source: base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "insidia.yaml"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "base",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / "insidia.yaml").write_text("secret_ref: env:GITHUB_TOKEN\n", encoding="utf-8")
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    env = os.environ.copy()
+    env["BASE_SHA"] = sha
+    env["RUNNER_TEMP"] = str(runner)
+    completed = subprocess.run(
+        [_bash(), "-c", str(read["run"])],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert (repo / "insidia.yaml").read_text(encoding="utf-8") == "source: base\n"
+    assert not (runner / "insidia.yaml").exists()
+
+
+def test_scan_step_does_not_receive_the_job_token() -> None:
+    scan = next(step for step in _steps(_action()) if "insidia --json scan" in step.get("run", ""))
+    assert scan["env"]["GITHUB_TOKEN"] == ""
+    assert scan["env"]["GH_TOKEN"] == ""
+
+
 def test_example_scans_only_the_local_fixture() -> None:
     text = _EXAMPLE.read_text()
     document = yaml.safe_load(text)
@@ -205,10 +327,18 @@ def test_scan_step_writes_json_from_insidia_json_scan(tmp_path: Path) -> None:
         line.strip() for line in _scan_script().splitlines() if "insidia --json scan" in line
     )
     assert command == (
-        'insidia --json scan --policy "$INSIDIA_POLICY" --yes > insidia-scan.json'
+        'insidia --json scan --policy "$INSIDIA_POLICY" --yes > "$RUNNER_TEMP/insidia-scan.json"'
     )
-    assert _scan_script().index(command) < _scan_script().index('if [ "$code" -eq 0 ]')
-    assert "insidia-scan.json" in _collect_script()
+    script = _scan_script()
+    assert script.index('rm -f "$RUNNER_TEMP/insidia-scan.json"') < script.index(command)
+    assert script.index(command) < script.index('if [ "$code" -eq 0 ]')
+    scan = next(step for step in _steps(_action()) if "insidia --json scan" in step.get("run", ""))
+    assert scan["id"] == "scan"
+    collect = next(step for step in _steps(_action()) if step.get("id") == "reports")
+    assert collect["if"] == (
+        "always() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure')"
+    )
+    assert '"$RUNNER_TEMP/insidia-scan.json"' in _collect_script()
     assert "run_dir" in _collect_script()
 
 
@@ -239,8 +369,9 @@ def test_scan_writes_json_even_when_the_exit_code_is_not_zero(
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
     env["INSIDIA_POLICY"] = "L1"
     env["INSIDIA_FAIL_ON_INCONCLUSIVE"] = fail_on_inconclusive
+    env["RUNNER_TEMP"] = str(_runner_temp(tmp_path))
     completed = subprocess.run(
-        ["bash", "-c", _scan_script()],
+        [_bash(), "-c", _scan_script()],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -248,7 +379,10 @@ def test_scan_writes_json_even_when_the_exit_code_is_not_zero(
         check=False,
     )
     assert completed.returncode == expected, completed.stderr + completed.stdout
-    saved = json.loads((tmp_path / "insidia-scan.json").read_text(encoding="utf-8"))
+    saved = json.loads(
+        (_runner_temp(tmp_path) / "insidia-scan.json").read_text(encoding="utf-8")
+    )
+    assert not (tmp_path / "insidia-scan.json").exists()
     assert saved["run_dir"] == f".insidia/runs/{_VALID}"
     assert (tmp_path / "insidia-argv").read_text(encoding="utf-8").splitlines() == [
         "--json",
@@ -265,9 +399,9 @@ def test_collect_reads_run_dir_and_ignores_a_later_planted_folder(tmp_path: Path
     planted = workspace / ".insidia" / "runs" / _PLANTED
     _fill(valid, "scan")
     _fill(planted, "planted")
-    (workspace / "insidia-scan.json").write_text(
+    _write_scan_json(
+        workspace,
         json.dumps({"run_dir": f".insidia/runs/{_VALID}"}) + "\n",
-        encoding="utf-8",
     )
 
     completed, outputs = _run_collect(workspace)
@@ -313,7 +447,7 @@ def test_run_dir_is_accepted_only_under_insidia_runs(tmp_path: Path) -> None:
             for child in reports.iterdir():
                 child.unlink()
         body = {} if raw is None else {"run_dir": raw}
-        (workspace / "insidia-scan.json").write_text(json.dumps(body), encoding="utf-8")
+        _write_scan_json(workspace, json.dumps(body))
         completed, outputs = _run_collect(workspace)
         assert completed.returncode == 0, completed.stderr
         return outputs
@@ -351,8 +485,22 @@ def test_collect_does_not_follow_a_report_symlink_out_of_the_run(tmp_path: Path)
     sarif = valid / "results.sarif"
     sarif.unlink()
     sarif.symlink_to(planted)
+    _write_scan_json(workspace, json.dumps({"run_dir": f".insidia/runs/{_VALID}"}))
+
+    completed, outputs = _run_collect(workspace)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "sarif=false" in outputs
+    assert "found=false" in outputs
+    assert not (workspace / "insidia-reports" / "results.sarif").exists()
+
+
+def test_workspace_scan_json_is_ignored_when_runner_temp_has_none(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    planted = workspace / ".insidia" / "runs" / _PLANTED
+    _fill(planted, "planted")
     (workspace / "insidia-scan.json").write_text(
-        json.dumps({"run_dir": f".insidia/runs/{_VALID}"}),
+        json.dumps({"run_dir": f".insidia/runs/{_PLANTED}"}) + "\n",
         encoding="utf-8",
     )
 
@@ -361,4 +509,6 @@ def test_collect_does_not_follow_a_report_symlink_out_of_the_run(tmp_path: Path)
     assert completed.returncode == 0, completed.stderr
     assert "sarif=false" in outputs
     assert "found=false" in outputs
-    assert not (workspace / "insidia-reports" / "results.sarif").exists()
+    for name in _REPORTS:
+        assert not (workspace / "insidia-reports" / name).exists()
+    assert not (_runner_temp(workspace) / "insidia-scan.json").exists()

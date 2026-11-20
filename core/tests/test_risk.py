@@ -16,7 +16,6 @@ _AWS = "AKIAIOSFODNN7EXAMPLE"
 def _hit(
     family: str,
     response: str,
-    *,
     severity: str = "high",
     confidence: str = "high",
     engine: str = "insidia",

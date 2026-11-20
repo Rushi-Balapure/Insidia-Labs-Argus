@@ -52,6 +52,7 @@ targets:
         assert main(["scan", "--config", str(config)]) == 1
     finally:
         server.shutdown()
+        server.server_close()
     assert {"messages": [{"role": "user", "content": "secret"}]} in seen
     findings = json.loads(_findings(tmp_path).read_text())
     assert findings[0]["response"] == CANARY

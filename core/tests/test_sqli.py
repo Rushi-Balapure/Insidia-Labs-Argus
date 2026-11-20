@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,14 +25,14 @@ def _database() -> sqlite3.Connection:
 
 
 def _concatenated(query: str) -> tuple[int, str]:
-    connection = _database()
-    try:
-        found = connection.execute(
-            f"SELECT name, note FROM accounts WHERE name = '{query}'"
-        ).fetchall()
-    except sqlite3.Error as exc:
-        return 500, f"sqlite3.OperationalError: {exc}"
-    return 200, json.dumps([{"name": name, "note": note} for name, note in found])
+    with closing(_database()) as connection:
+        try:
+            found = connection.execute(
+                f"SELECT name, note FROM accounts WHERE name = '{query}'"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            return 500, f"sqlite3.OperationalError: {exc}"
+        return 200, json.dumps([{"name": name, "note": note} for name, note in found])
 
 
 def _boolean_only(query: str) -> tuple[int, str]:
@@ -44,22 +45,22 @@ def _boolean_only(query: str) -> tuple[int, str]:
 
 def _error_only(query: str) -> tuple[int, str]:
     """A quote raises. A successful injection still returns one fixed row."""
-    connection = _database()
-    try:
-        connection.execute(f"SELECT name, note FROM accounts WHERE name = '{query}'").fetchall()
-    except sqlite3.Error as exc:
-        return 500, f"sqlite3.OperationalError: {exc}"
-    return 200, json.dumps([{"name": "ada", "note": "one"}])
+    with closing(_database()) as connection:
+        try:
+            connection.execute(f"SELECT name, note FROM accounts WHERE name = '{query}'").fetchall()
+        except sqlite3.Error as exc:
+            return 500, f"sqlite3.OperationalError: {exc}"
+        return 200, json.dumps([{"name": "ada", "note": "one"}])
 
 
 def _parameterised(query: str) -> tuple[int, str]:
     if not query.isalnum():
         return 400, "bad query"
-    connection = _database()
-    found = connection.execute(
-        "SELECT name, note FROM accounts WHERE name = ?", (query,)
-    ).fetchall()
-    return 200, json.dumps([{"name": name, "note": note} for name, note in found])
+    with closing(_database()) as connection:
+        found = connection.execute(
+            "SELECT name, note FROM accounts WHERE name = ?", (query,)
+        ).fetchall()
+        return 200, json.dumps([{"name": name, "note": note} for name, note in found])
 
 
 def _always_error(query: str) -> tuple[int, str]:

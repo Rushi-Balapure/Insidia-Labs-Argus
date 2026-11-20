@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,6 +49,34 @@ class ScannerNotBuilt(Exception):
         super().__init__(f"{cell.cell_id} is owned by phase {cell.phase} and has no scanner yet")
 
 
+class ScanError(Exception):
+    """The scan did not finish. An empty finding list would be a false negative."""
+
+
+SCANNER_PROVEN = "scanner proven"
+TARGET_VERIFIED = "target verified"
+
+
+@dataclass(frozen=True)
+class CellResult:
+    findings: tuple[Finding, ...]
+    label: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class EvidenceSummary:
+    scanner_proven: int
+    target_verified: int
+
+
+def summarize(labels: Sequence[str]) -> EvidenceSummary:
+    return EvidenceSummary(
+        sum(label == SCANNER_PROVEN for label in labels),
+        sum(label == TARGET_VERIFIED for label in labels),
+    )
+
+
 @dataclass(frozen=True)
 class SandboxCall:
     """One planted function the built-in probes can hit."""
@@ -75,26 +103,41 @@ def scanner_ready(cell: Cell) -> bool:
     return upstream_ready(cell) or live_ready(cell)
 
 
-def run_cell(cell: Cell) -> list[Finding]:
+def cell_evidence(cell: Cell) -> str:
+    """How this cell is judged. A library with no endpoint is not a scanner proof."""
     if not scanner_ready(cell):
         raise ScannerNotBuilt(cell)
     if plant_for(cell.target, cell.attack).location.startswith(_INSIDIA):
-        return _prove(cell)
-    from benchmark.harness.suite import prove_suite, suite_ready
+        return SCANNER_PROVEN
+    from benchmark.harness.suite import suite_ready
 
     if suite_ready(cell):
-        return prove_suite(cell)
+        return TARGET_VERIFIED
+    return SCANNER_PROVEN
+
+
+def run_cell(cell: Cell) -> CellResult:
+    if not scanner_ready(cell):
+        raise ScannerNotBuilt(cell)
+    if plant_for(cell.target, cell.attack).location.startswith(_INSIDIA):
+        return CellResult(tuple(_prove(cell)), SCANNER_PROVEN)
+    from benchmark.harness.suite import suite_ready, suite_verified
+
+    if suite_ready(cell):
+        if not suite_verified(cell):
+            raise ScanError(f"{cell.cell_id} is not the planted suite")
+        return CellResult((), TARGET_VERIFIED, "agentdojo is a library with no scan target")
     from benchmark.harness.live import live_ready, prove_live
     from benchmark.harness.upstream import prove_upstream, upstream_ready
 
     white = upstream_ready(cell)
     live = live_ready(cell)
     if white and live:
-        raise RuntimeError(f"{cell.cell_id} is both a file needle and a live hit")
+        raise RuntimeError(f"{cell.cell_id} is both a repository cell and a live cell")
     if white:
-        return prove_upstream(cell)
+        return CellResult(tuple(prove_upstream(cell)), SCANNER_PROVEN)
     if live:
-        return prove_live(cell)
+        return CellResult(tuple(prove_live(cell)), SCANNER_PROVEN)
     raise ScannerNotBuilt(cell)
 
 
@@ -108,10 +151,37 @@ def _prove(cell: Cell) -> list[Finding]:
     return _matched(cell, findings)
 
 
+_GROUNDS: dict[str, set[str]] = {}
+
+
+def _ground_truth(target: str) -> set[str]:
+    cached = _GROUNDS.get(target)
+    if cached is None:
+        from benchmark.matrix.registry import valid_cells
+
+        cached = {item.attack for item in valid_cells() if item.target == target}
+        _GROUNDS[target] = cached
+    return cached
+
+
 def _matched(cell: Cell, findings: list[dict[str, object]]) -> list[Finding]:
-    if any(item.get("attack") == cell.attack for item in findings):
-        return [Finding(cell.plant_ids[0])]
-    return []
+    planted = _ground_truth(cell.target)
+    scored: list[Finding] = []
+    for item in findings:
+        attack = item.get("attack")
+        if isinstance(attack, str) and attack in planted and attack != cell.attack:
+            continue
+        severity = item.get("severity")
+        level = severity if isinstance(severity, str) and severity else "high"
+        if attack == cell.attack:
+            scored.append(Finding(cell.plant_ids[0], level))
+            continue
+        token = item.get("evidence_hash") or item.get("probe") or item.get("check_id")
+        if not isinstance(token, str) or not token:
+            token = "finding"
+        name = attack if isinstance(attack, str) and attack else "unknown"
+        scored.append(Finding(f"unmatched.{name}.{token}", level))
+    return scored
 
 
 def _call_for(cell: Cell) -> SandboxCall:
@@ -124,46 +194,10 @@ def _call_for(cell: Cell) -> SandboxCall:
 def _scan(call: SandboxCall, conn: str) -> list[dict[str, object]]:
     if call.kind == "repo":
         return _cli(call, None)
-    if conn == "sdk_bridge":
-        return _sdk(call)
     sandbox = _ensure_sandbox()
     _reset(sandbox)
     with _front(conn, sandbox) as port:
         return _cli(call, port)
-
-
-def _sdk(call: SandboxCall) -> list[dict[str, object]]:
-    _ensure_insidia_import()
-    from insidia.adapters import BUILT_IN, ORACLES
-    from insidia.config import RateLimit, Target
-
-    from benchmark.targets.insidia.serve import call as plant
-    from benchmark.targets.insidia.serve import reset
-
-    reset()
-    spec = next(item for item in BUILT_IN.probes if item.family == call.attack)
-    oracle = ORACLES[spec.family]
-    viewed = Target(
-        "plant",
-        call.kind,
-        None,
-        None,
-        "GET",
-        None,
-        None,
-        {},
-        {},
-        None,
-        RateLimit(100, 1),
-        "http",
-        None,
-        (),
-    )
-    found: list[dict[str, object]] = []
-    for payload in BUILT_IN.corpus[spec]:
-        if oracle(payload, plant(call.module, call.fn, payload), viewed) is not None:
-            found.append({"attack": call.attack})
-    return found
 
 
 def _cli(call: SandboxCall, port: int | None) -> list[dict[str, object]]:
@@ -190,7 +224,7 @@ def _cli(call: SandboxCall, port: int | None) -> list[dict[str, object]]:
 
 @contextlib.contextmanager
 def _front(conn: str, sandbox: int) -> Iterator[int]:
-    if conn == "direct":
+    if conn in {"direct", "sdk_bridge"}:
         yield sandbox
         return
     if conn == "relay":
@@ -419,18 +453,73 @@ targets:
 
 
 def _run_scan(root: Path) -> list[dict[str, object]]:
+    _ensure_insidia_import()
     from insidia.cli import main
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        main(["scan", "--config", str(root / "insidia.yaml"), "--coverage", "standard"])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(
+                [
+                    "scan",
+                    "--config",
+                    str(root / "insidia.yaml"),
+                    "--coverage",
+                    "standard",
+                    "--quiet",
+                ]
+            )
+    except SystemExit as exc:
+        raise ScanError(f"scan exited via SystemExit {exc.code}") from exc
+    except Exception as exc:
+        raise ScanError(f"scan crashed: {exc}") from exc
+    if not isinstance(code, int):
+        raise ScanError(f"scan returned {code!r}")
+    return _completed_findings(root, code)
+
+
+def _completed_findings(root: Path, code: int) -> list[dict[str, object]]:
+    if code == 130:
+        raise ScanError("scan was cancelled")
+    run = _latest_run(root)
+    if run is None:
+        raise ScanError(f"scan exited {code} without a run")
+    status, verdict, findings = _read_run(run)
+    if status == "cancelled":
+        raise ScanError("scan was cancelled")
+    if code == 1 and findings:
+        return findings
+    if code == 0 and status == "complete" and verdict == "pass":
+        return findings
+    raise ScanError(f"scan exited {code} with status {status} and verdict {verdict}")
+
+
+def _latest_run(root: Path) -> Path | None:
     runs = root / ".insidia" / "runs"
     if not runs.is_dir():
-        return []
-    latest = max(runs.iterdir(), key=lambda path: path.name)
-    payload = json.loads((latest / "findings.json").read_text())
-    if not isinstance(payload, list):
-        return []
-    return [item for item in payload if isinstance(item, dict)]
+        return None
+    finished = [path for path in runs.iterdir() if path.is_dir() and not path.name.startswith(".")]
+    if not finished:
+        return None
+    return max(finished, key=lambda path: path.name)
+
+
+def _read_run(run: Path) -> tuple[str, str, list[dict[str, object]]]:
+    benchmark = run / "benchmark.json"
+    recorded = run / "findings.json"
+    if not benchmark.is_file() or not recorded.is_file():
+        raise ScanError(f"{run.name} is missing benchmark.json or findings.json")
+    try:
+        status_doc = json.loads(benchmark.read_text(encoding="utf-8"))
+        payload = json.loads(recorded.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ScanError(f"{run.name} has unreadable results") from exc
+    if not isinstance(status_doc, dict) or not isinstance(payload, list):
+        raise ScanError(f"{run.name} has unexpected results")
+    status = status_doc.get("execution_status")
+    verdict = status_doc.get("policy_verdict")
+    if not isinstance(status, str) or not isinstance(verdict, str):
+        raise ScanError(f"{run.name} has no execution status")
+    return status, verdict, [item for item in payload if isinstance(item, dict)]
 
 
 atexit.register(_shutdown_sandbox)

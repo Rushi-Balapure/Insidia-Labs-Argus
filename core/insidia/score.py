@@ -77,7 +77,7 @@ def _frameworks() -> tuple[Framework, ...]:
 
 
 def _load(filename: str) -> Framework:
-    loaded = yaml.safe_load((_MAP_DIR / filename).read_text())
+    loaded = yaml.safe_load((_MAP_DIR / filename).read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ValueError(f"{filename} must be a mapping")
     name = loaded.get("framework")
@@ -232,7 +232,6 @@ def risk_assessment(
     text: str,
     confidence: str,
     engine_count: int,
-    *,
     non_prod: bool = False,
 ) -> tuple[str, float, tuple[str, ...], tuple[str, ...]]:
     """Return severity, Insidia Risk Score, explainers, and CVE ids.

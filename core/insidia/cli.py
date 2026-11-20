@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
 from insidia import version_text
@@ -22,9 +23,11 @@ from insidia.engines import install, list_engines
 from insidia.errors import CliError, ConfigError
 from insidia.mcp import serve
 from insidia.policy import POLICIES, get_policy
-from insidia.runstore import latest_run, local_time, read_manifest, verdict_text
+from insidia.run_artifacts import read_manifest
+from insidia.runstore import latest_run, local_time, verdict_text
 from insidia.scan import execute
 from insidia.ui import InstallView, ScanView, Terminal
+from insidia.upgrade import upgrade
 
 _HELP = """\
 global options, before or after the command:
@@ -35,9 +38,10 @@ global options, before or after the command:
   --no-color      plain text, no color
 """
 
+type _Subparsers = argparse._SubParsersAction[argparse.ArgumentParser]
+
 
 def _global_options(parser: argparse.ArgumentParser, after_command: bool) -> None:
-    # After the command the defaults are suppressed, so a value given before it survives.
     def default(value: object) -> object:
         return argparse.SUPPRESS if after_command else value
 
@@ -85,10 +89,45 @@ class _Version(argparse.Action):
         parser.exit()
 
 
+def _prepare_stdio() -> None:
+    """A redirected Windows stream uses the ANSI code page, which cannot write ✔."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
+def _mark(ok: bool) -> str:
+    glyph = "✔" if ok else "✘"
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        glyph.encode(encoding)
+    except (LookupError, UnicodeError):
+        return "+ " if ok else "x "
+    return f"{glyph} "
+
+
 def main(argv: list[str] | None = None) -> int:
+    _prepare_stdio()
+    parser = _parser()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args)
+    except CliError as exc:
+        _emit(args.json, {"error": str(exc)}, str(exc))
+        return exc.code
+    except KeyboardInterrupt:
+        _emit(args.json, {"error": "cancelled"}, "Cancelled.")
+        return 130
+
+
+def _parser() -> argparse.ArgumentParser:
     shared = argparse.ArgumentParser(add_help=False)
     _global_options(shared, after_command=True)
-
     parser = argparse.ArgumentParser(
         prog="insidia",
         description="Test an AI app and the API around it. Settings live in insidia.yaml.",
@@ -105,6 +144,19 @@ def main(argv: list[str] | None = None) -> int:
         title="commands",
         metavar="COMMAND",
     )
+    _add_init(subcommands, shared)
+    _add_doctor(subcommands, shared)
+    _add_engines(subcommands, shared)
+    _add_policy(subcommands, shared)
+    _add_scan(subcommands, shared)
+    _add_report(subcommands, shared)
+    _add_rerun(subcommands, shared)
+    _add_mcp(subcommands, shared)
+    _add_upgrade(subcommands, shared)
+    return parser
+
+
+def _add_init(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     init = subcommands.add_parser(
         "init",
         parents=[shared],
@@ -119,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
         "--kind",
         help="target kind (default: chat when the URL path ends with /chat)",
     )
+
+
+def _add_doctor(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     subcommands.add_parser(
         "doctor",
         parents=[shared],
@@ -126,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Check Python, the config file, and installed engines.",
     )
 
+
+def _add_engines(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     engines = subcommands.add_parser(
         "engines",
         parents=[shared],
@@ -153,9 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     install_parser.add_argument(
         "--allow-unverified",
         action="store_true",
-        help="install a downloaded binary that has no pinned SHA-256 for this platform",
+        help="does not skip hash checks; packages and downloads are always verified",
     )
 
+
+def _add_policy(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     policy = subcommands.add_parser(
         "policy",
         parents=[shared],
@@ -180,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
         help="check the policy named in the config file",
     )
 
+
+def _add_scan(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     scan = subcommands.add_parser(
         "scan",
         parents=[shared],
@@ -210,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+
+def _add_report(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     report = subcommands.add_parser(
         "report",
         parents=[shared],
@@ -218,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     report.add_argument("run_id", nargs="?", help="run to open (default: the latest run)")
     report.add_argument("--open", action="store_true", help="open the report in a browser")
+
+
+def _add_rerun(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     rerun = subcommands.add_parser(
         "rerun",
         parents=[shared],
@@ -225,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Scan again with the policy and config recorded for a run.",
     )
     rerun.add_argument("run_id", nargs="?", help="run to repeat (default: the latest run)")
+
+
+def _add_mcp(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
     mcp = subcommands.add_parser(
         "mcp",
         parents=[shared],
@@ -241,122 +310,176 @@ def main(argv: list[str] | None = None) -> int:
         help="allow a scan whose scope names a host other than localhost",
     )
 
-    args = parser.parse_args(argv)
-    try:
-        return _run(args)
-    except CliError as exc:
-        _emit(args.json, {"error": str(exc)}, str(exc))
-        return exc.code
-    except KeyboardInterrupt:
-        _emit(args.json, {"error": "cancelled"}, "Cancelled.")
-        return 130
+
+def _add_upgrade(subcommands: _Subparsers, shared: argparse.ArgumentParser) -> None:
+    upgrade_parser = subcommands.add_parser(
+        "upgrade",
+        parents=[shared],
+        help="install the latest release with the tool that installed Insidia",
+        description=(
+            "Check GitHub for the latest release and reinstall Insidia from the "
+            "published wheel after its SHA-256 matches the release checksum. "
+            "Installed engines are kept."
+        ),
+    )
+    upgrade_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="only report whether a newer release exists",
+    )
+    upgrade_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reinstall the latest release even when it is the version you have",
+    )
 
 
-def _run(args: argparse.Namespace) -> int:
-    if args.command == "init":
-        url = args.url
-        kind = args.kind
-        destination = init_destination(Path(args.config))
-        if destination.exists():
-            raise ConfigError(f"{destination} already exists")
-        if url is not None:
-            prepare_init_url(url)
-        if kind is not None:
-            prepare_init_kind(url or "http://127.0.0.1:8080/chat", kind)
-        _progress(args, f"Writing {destination}.")
-        path = init_config(Path(args.config), url=url, kind=kind)
-        written = url or "http://127.0.0.1:8080/chat"
-        document: dict[str, object] = {"wrote": path.name, "url": written}
-        text = f"Wrote {path.name} with targets.app.url {written}."
-        if url is None:
-            document["next"] = "Set targets.app.url to your app before you scan."
-            text += (
-                " Set targets.app.url to your app before you scan. "
-                "Example: insidia init --url http://127.0.0.1:PORT/path"
-            )
-        _emit(args.json, document, text)
-        return 0
-    if args.command == "doctor":
-        _progress(args, "Checking Python, the config file, and installed engines.")
-        checks, code = diagnose(Path(args.config))
-        lines = [_doctor_line(check) for check in checks]
-        _emit(args.json, {"checks": checks}, "\n".join(lines))
-        return code
-    if args.command == "engines" and args.engine_command in {None, "list"}:
-        engines = list_engines()
-        lines = []
-        for item in engines:
-            state = "installed" if item["installed"] else "not installed"
-            if "note" in item:
-                state = f"downloaded, {item['note']}"
-            lines.append(f"{item['name']} {item['license']} {state}")
-        _emit(args.json, {"engines": engines}, "\n".join(lines))
-        return 0
-    if args.command == "engines" and args.engine_command == "install":
-        terminal = _terminal(args)
-        message = install(
-            tuple(args.names),
-            docker=args.docker,
-            progress=InstallView(terminal),
-            allow_unverified=args.allow_unverified,
+def _init(args: argparse.Namespace) -> int:
+    url = args.url
+    kind = args.kind
+    destination = init_destination(Path(args.config))
+    if destination.exists():
+        raise ConfigError(f"{destination} already exists")
+    if url is not None:
+        prepare_init_url(url)
+    if kind is not None:
+        prepare_init_kind(url or "http://127.0.0.1:8080/chat", kind)
+    _progress(args, f"Writing {destination}.")
+    path = init_config(Path(args.config), url=url, kind=kind)
+    written = url or "http://127.0.0.1:8080/chat"
+    document: dict[str, object] = {"wrote": path.name, "url": written}
+    text = f"Wrote {path.name} with targets.app.url {written}."
+    if url is None:
+        document["next"] = "Set targets.app.url to your app before you scan."
+        text += (
+            " Set targets.app.url to your app before you scan. "
+            "Example: insidia init --url http://127.0.0.1:PORT/path"
         )
-        _emit(args.json, {"message": message}, message)
-        return 0
-    if args.command == "policy" and args.policy_command == "list":
-        rows = [{"name": name, "available": name == "L1"} for name in POLICIES]
-        lines = [
-            f"{row['name']} {'available' if row['available'] else 'unavailable'}" for row in rows
-        ]
-        _emit(args.json, {"policies": rows}, "\n".join(lines))
-        return 0
-    if args.command == "policy" and args.policy_command == "show":
-        policy = get_policy(args.name)
-        controls = [control.family for control in policy.controls]
-        available = policy.name == "L1"
-        summary = policy.summary if available else f"{policy.summary} Not available yet."
-        _emit(
-            args.json,
-            {
-                "name": policy.name,
-                "summary": summary,
-                "available": available,
-                "controls": controls,
-            },
-            f"{policy.name}: {summary}",
-        )
-        return 0
-    if args.command == "policy" and args.policy_command == "validate":
-        project = load_project(Path(args.config))
-        get_policy(project.policy)
-        if project.policy != "L1":
-            raise CliError(f"policy {project.policy} is not available. Use L1.")
-        _emit(args.json, {"policy": project.policy, "valid": True}, f"{project.policy} is valid")
-        return 0
-    if args.command == "scan":
-        config = Path(args.config)
-        return _finish_scan(args, load_project(config), config.resolve().parent)
-    if args.command == "rerun":
-        return _rerun(args)
-    if args.command == "report":
-        directory = _run_dir(args.run_id, args.config)
-        read_manifest(directory)
-        report_path = directory / "report.html"
-        if not report_path.is_file():
-            raise CliError(f"run {directory.name} has no report")
-        if not args.open:
-            _emit(args.json, {"report": str(report_path)}, str(report_path))
-            return 0
-        opened = _open(report_path)
-        text = (
-            f"Opened {report_path}."
-            if opened
-            else f"No browser could be opened here. The report is at {report_path}."
-        )
-        _emit(args.json, {"report": str(report_path), "opened": opened}, text)
-        return 0
-    if args.command == "mcp":
-        return serve(sys.stdin.buffer, sys.stdout.buffer, allow_remote=args.allow_remote)
+    _emit(args.json, document, text)
+    return 0
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    _progress(args, "Checking Python, the config file, and installed engines.")
+    checks, code = diagnose(Path(args.config))
+    lines = [_doctor_line(check) for check in checks]
+    _emit(args.json, {"checks": checks}, "\n".join(lines))
+    return code
+
+
+def _engines(args: argparse.Namespace) -> int:
+    if args.engine_command in {None, "list"}:
+        return _engines_list(args)
+    if args.engine_command == "install":
+        return _engines_install(args)
     raise CliError(f"unknown command {args.command}")
+
+
+def _engines_list(args: argparse.Namespace) -> int:
+    engines = list_engines()
+    lines = []
+    for item in engines:
+        state = "installed" if item["installed"] else "not installed"
+        if "note" in item:
+            state = f"downloaded, {item['note']}"
+        lines.append(f"{item['name']} {item['license']} {state}")
+    _emit(args.json, {"engines": engines}, "\n".join(lines))
+    return 0
+
+
+def _engines_install(args: argparse.Namespace) -> int:
+    terminal = _terminal(args)
+    message = install(
+        tuple(args.names),
+        docker=args.docker,
+        progress=InstallView(terminal),
+        allow_unverified=args.allow_unverified,
+    )
+    _emit(args.json, {"message": message}, message)
+    return 0
+
+
+def _policy(args: argparse.Namespace) -> int:
+    commands: dict[str, Callable[[argparse.Namespace], int]] = {
+        "list": _policy_list,
+        "show": _policy_show,
+        "validate": _policy_validate,
+    }
+    handler = commands.get(args.policy_command)
+    if handler is None:
+        raise CliError(f"unknown command {args.command}")
+    return handler(args)
+
+
+def _policy_list(args: argparse.Namespace) -> int:
+    rows = [{"name": name, "available": name == "L1"} for name in POLICIES]
+    lines = [
+        f"{row['name']} {'available' if row['available'] else 'unavailable'}" for row in rows
+    ]
+    _emit(args.json, {"policies": rows}, "\n".join(lines))
+    return 0
+
+
+def _policy_show(args: argparse.Namespace) -> int:
+    policy = get_policy(args.name)
+    controls = [control.family for control in policy.controls]
+    available = policy.name == "L1"
+    summary = policy.summary if available else f"{policy.summary} Not available yet."
+    _emit(
+        args.json,
+        {
+            "name": policy.name,
+            "summary": summary,
+            "available": available,
+            "controls": controls,
+        },
+        f"{policy.name}: {summary}",
+    )
+    return 0
+
+
+def _policy_validate(args: argparse.Namespace) -> int:
+    project = load_project(Path(args.config))
+    get_policy(project.policy)
+    if project.policy != "L1":
+        raise CliError(f"policy {project.policy} is not available. Use L1.")
+    _emit(args.json, {"policy": project.policy, "valid": True}, f"{project.policy} is valid")
+    return 0
+
+
+def _scan(args: argparse.Namespace) -> int:
+    config = Path(args.config)
+    return _finish_scan(args, load_project(config), config.resolve().parent)
+
+
+def _report(args: argparse.Namespace) -> int:
+    directory = _run_dir(args.run_id, args.config)
+    read_manifest(directory)
+    report_path = directory / "report.html"
+    if not report_path.is_file():
+        raise CliError(f"run {directory.name} has no report")
+    if not args.open:
+        _emit(args.json, {"report": str(report_path)}, str(report_path))
+        return 0
+    opened = _open(report_path)
+    text = (
+        f"Opened {report_path}."
+        if opened
+        else f"No browser could be opened here. The report is at {report_path}."
+    )
+    _emit(args.json, {"report": str(report_path), "opened": opened}, text)
+    return 0
+
+
+def _mcp(args: argparse.Namespace) -> int:
+    return serve(sys.stdin.buffer, sys.stdout.buffer, allow_remote=args.allow_remote)
+
+
+def _upgrade(args: argparse.Namespace) -> int:
+    _progress(args, "Checking GitHub for the latest release.")
+    document, text = upgrade(check=args.check, force=args.force)
+    _emit(args.json, document, text)
+    return 0
 
 
 def _finish_scan(
@@ -389,6 +512,8 @@ def _finish_scan(
         untested=outcome.untested,
         run_id=outcome.run_id,
         started=outcome.started_at,
+        low_assurance=outcome.low_assurance,
+        assurance_reason=outcome.assurance_reason,
     )
     document = {
         "schema_version": "2.0",
@@ -396,6 +521,8 @@ def _finish_scan(
         "passed": outcome.passed,
         "execution_status": outcome.execution_status,
         "policy_verdict": outcome.policy_verdict or ("pass" if outcome.passed else "fail"),
+        "low_assurance": outcome.low_assurance,
+        "assurance_reason": outcome.assurance_reason,
         "findings": [finding.as_json() for finding in outcome.findings],
         "skips": outcome.skips,
         "run_dir": str(outcome.run_dir),
@@ -411,6 +538,8 @@ def _finish_scan(
             untested=outcome.untested,
             run_id=outcome.run_id,
             started=outcome.started_at,
+            low_assurance=outcome.low_assurance,
+            assurance_reason=outcome.assurance_reason,
         ),
     }
     if outcome.notes:
@@ -449,6 +578,26 @@ def _rerun(args: argparse.Namespace) -> int:
     )
 
 
+_COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "init": _init,
+    "doctor": _doctor,
+    "engines": _engines,
+    "policy": _policy,
+    "scan": _scan,
+    "rerun": _rerun,
+    "report": _report,
+    "mcp": _mcp,
+    "upgrade": _upgrade,
+}
+
+
+def _run(args: argparse.Namespace) -> int:
+    handler = _COMMANDS.get(args.command)
+    if handler is None:
+        raise CliError(f"unknown command {args.command}")
+    return handler(args)
+
+
 def _run_dir(run_id: str | None, config: str) -> Path:
     root = Path(config).resolve().parent
     if run_id:
@@ -473,6 +622,8 @@ def scan_message(
     untested: int = 0,
     run_id: str = "",
     started: str = "",
+    low_assurance: bool = False,
+    assurance_reason: str = "",
 ) -> str:
     head = verdict_text(
         policy,
@@ -481,6 +632,8 @@ def scan_message(
         execution_status=execution_status,
         policy_verdict=policy_verdict,
         untested=untested,
+        low_assurance=low_assurance,
+        assurance_reason=assurance_reason,
     )
     if opened:
         body = f"{head} Opened {report}."
@@ -515,7 +668,7 @@ def _progress(args: argparse.Namespace, message: str) -> None:
 def _doctor_line(check: dict[str, object]) -> str:
     mark = ""
     if check.get("required") is not False:
-        mark = "✔ " if check["ok"] else "✘ "
+        mark = _mark(bool(check["ok"]))
     return f"{mark}{check['name']}: {check['detail']}"
 
 

@@ -19,8 +19,16 @@ class EngineFailed(CliError):
     """An upstream engine is missing or did not produce a report."""
 
 
+class EngineTimeout(EngineFailed):
+    """An upstream engine did not finish before its timeout."""
+
+
 class ProbeError(CliError):
     """This check did not receive a usable response from the target."""
+
+
+class ProbeTimeout(ProbeError):
+    """The target did not answer before the timeout."""
 
 
 class HttpStatus(ProbeError):
